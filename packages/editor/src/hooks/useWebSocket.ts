@@ -7,6 +7,10 @@ export function useWebSocket(deckId: string | null) {
   const setDeck = useEditorStore((s) => s.setDeck);
 
   const fetchDeck = useCallback(async (id: string) => {
+    // Skip refresh if we're actively editing (dirty or saving)
+    const { dirty, saving } = useEditorStore.getState();
+    if (dirty || saving) return;
+
     try {
       const res = await fetch(`/api/decks/${id}`);
       if (res.ok) {
@@ -34,7 +38,7 @@ export function useWebSocket(deckId: string | null) {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'deck-updated' && msg.deckId === deckId) {
+          if (msg.type === 'deck-updated' && msg.deckId === deckId && deckId) {
             fetchDeck(deckId);
           }
         } catch {}
@@ -51,10 +55,14 @@ export function useWebSocket(deckId: string | null) {
     }
 
     connect();
-    fetchDeck(deckId);
+    // Initial fetch always runs regardless of dirty state
+    fetch(`/api/decks/${deckId}`)
+      .then((res) => res.ok ? res.json() : null)
+      .then((deck) => { if (deck) setDeck(deck); })
+      .catch((err) => console.error('Failed to fetch deck:', err));
 
     return () => {
       wsRef.current?.close();
     };
-  }, [deckId, setConnected, fetchDeck]);
+  }, [deckId, setConnected, fetchDeck, setDeck]);
 }

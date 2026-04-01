@@ -183,7 +183,15 @@ export class PreviewServer {
       if (slideHtmls.length === 0) { res.status(400).json({ error: 'No slides to export' }); return; }
       const outPath = join(tmpdir(), `slidecraft-${deck.id}-${Date.now()}.pdf`);
       const result = await exportToPdf(deck, slideHtmls, outPath);
-      if (!result.success) { res.status(500).json({ error: result.error }); return; }
+      if (!result.success) {
+        res.status(500).send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>エクスポートエラー</title></head>
+<body><script>
+  alert('PDFエクスポートに失敗しました: ${escHtml(result.error ?? '不明なエラー')}');
+  history.back();
+</script></body></html>`);
+        return;
+      }
       res.download(outPath, `${deck.title}.pdf`, () => { unlink(outPath).catch(() => {}); });
     });
 
@@ -199,7 +207,15 @@ export class PreviewServer {
       if (slideHtmls.length === 0) { res.status(400).json({ error: 'No slides to export' }); return; }
       const outPath = join(tmpdir(), `slidecraft-${deck.id}-${Date.now()}.pptx`);
       const result = await exportToPptx(deck, slideHtmls, outPath);
-      if (!result.success) { res.status(500).json({ error: result.error }); return; }
+      if (!result.success) {
+        res.status(500).send(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>エクスポートエラー</title></head>
+<body><script>
+  alert('PPTXエクスポートに失敗しました: ${escHtml(result.error ?? '不明なエラー')}');
+  history.back();
+</script></body></html>`);
+        return;
+      }
       res.download(outPath, `${deck.title}.pptx`, () => { unlink(outPath).catch(() => {}); });
     });
 
@@ -260,6 +276,8 @@ export class PreviewServer {
     .tab-btn { padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; color: #94a3b8; background: transparent; transition: all 0.15s; }
     .tab-btn:hover { color: var(--text); }
     .tab-btn.active { background: var(--accent); color: #fff; }
+    .edit-btn { padding: 6px 14px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font-size: 13px; font-weight: 500; text-decoration: none; transition: all 0.15s; }
+    .edit-btn:hover { background: #4f46e5; border-color: #4f46e5; }
 
     .main { flex: 1; display: flex; overflow: hidden; }
 
@@ -306,28 +324,29 @@ export class PreviewServer {
 <body>
   <div class="header">
     <div class="header-left">
-      <a href="/">\\u2190 \\u30db\\u30fc\\u30e0</a>
+      <a href="/">\u2190 \u30db\u30fc\u30e0</a>
       <div>
         <h1 id="deckTitle" onclick="startEditDeckTitle()">${escHtml(deck.title)}</h1>
         <div class="meta">
-          ${deck.slides.length} slides \\u00b7 v2 HTML-first \\u00b7
-          <code class="deck-id-code" onclick="copyDeckId()" title="\\u30af\\u30ea\\u30c3\\u30af\\u3067\\u30b3\\u30d4\\u30fc">${deck.id}</code>
+          ${deck.slides.length} slides \u00b7 v2 HTML-first \u00b7
+          <code class="deck-id-code" onclick="copyDeckId()" title="\u30af\u30ea\u30c3\u30af\u3067\u30b3\u30d4\u30fc">${deck.id}</code>
         </div>
       </div>
     </div>
     <div class="header-right">
       <div class="tab-group">
-        <button class="tab-btn active" onclick="setView('preview')">\\u30d7\\u30ec\\u30d3\\u30e5\\u30fc</button>
-        <button class="tab-btn" onclick="setView('code')">\\ud83d\\udcbb HTML\\u30bd\\u30fc\\u30b9</button>
+        <button class="tab-btn active" onclick="setView('preview')">\u30d7\u30ec\u30d3\u30e5\u30fc</button>
+        <button class="tab-btn" onclick="setView('code')">\ud83d\udcbb HTML\u30bd\u30fc\u30b9</button>
       </div>
+      <a href="http://localhost:4985?deck=${deck.id}" class="edit-btn" target="_blank">\u270f\ufe0f \u7de8\u96c6</a>
       <div class="export-wrap">
-        <button class="export-btn" onclick="toggleExportMenu()">\\u2b07 \\u30a8\\u30af\\u30b9\\u30dd\\u30fc\\u30c8</button>
+        <button class="export-btn" onclick="toggleExportMenu()">\u2b07 \u30a8\u30af\u30b9\u30dd\u30fc\u30c8</button>
         <div class="export-menu" id="exportMenu">
-          <a href="/api/decks/${deck.id}/export/pdf" download>\\ud83d\\udcc4 PDF</a>
-          <a href="/api/decks/${deck.id}/export/pptx" download>\\ud83d\\udcca PPTX</a>
+          <a href="/api/decks/${deck.id}/export/pdf" download>\ud83d\udcc4 PDF</a>
+          <a href="/api/decks/${deck.id}/export/pptx" download>\ud83d\udcca PPTX</a>
         </div>
       </div>
-      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="\\u30c6\\u30fc\\u30de\\u5207\\u66ff">\\ud83c\\udf19</button>
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="\u30c6\u30fc\u30de\u5207\u66ff">\ud83c\udf19</button>
       <div class="status"><div class="status-dot" id="statusDot"></div><span id="statusText">Live</span></div>
     </div>
   </div>
@@ -341,8 +360,8 @@ export class PreviewServer {
     </div>
     <div class="code-panel" id="codePanel">
       <div class="code-header">
-        <h3>HTML \\u30bd\\u30fc\\u30b9</h3>
-        <button class="copy-btn" onclick="copyCode()" id="copyBtn">\\u30b3\\u30d4\\u30fc</button>
+        <h3>HTML \u30bd\u30fc\u30b9</h3>
+        <button class="copy-btn" onclick="copyCode()" id="copyBtn">\u30b3\u30d4\u30fc</button>
       </div>
       <div class="slide-info" id="slideInfo">
         <span class="badge" id="slideInfoBadge">Slide 1</span>
@@ -462,7 +481,7 @@ export class PreviewServer {
       navigator.clipboard.writeText(deckId).then(() => {
         const el = document.querySelector('.deck-id-code');
         const orig = el.textContent;
-        el.textContent = '\\u2713 \\u30b3\\u30d4\\u30fc\\u6e08\\u307f';
+        el.textContent = '\u2713 \u30b3\u30d4\u30fc\u6e08\u307f';
         setTimeout(() => { el.textContent = orig; }, 1500);
       });
     }
@@ -498,9 +517,9 @@ export class PreviewServer {
       const text = document.getElementById('codeContent').textContent;
       navigator.clipboard.writeText(text).then(() => {
         const btn = document.getElementById('copyBtn');
-        btn.textContent = '\\u2713 \\u30b3\\u30d4\\u30fc\\u6e08\\u307f';
+        btn.textContent = '\u2713 \u30b3\u30d4\u30fc\u6e08\u307f';
         btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = '\\u30b3\\u30d4\\u30fc'; btn.classList.remove('copied'); }, 2000);
+        setTimeout(() => { btn.textContent = '\u30b3\u30d4\u30fc'; btn.classList.remove('copied'); }, 2000);
       });
     }
 
@@ -558,14 +577,14 @@ export class PreviewServer {
       const html = document.documentElement;
       const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
       html.dataset.theme = next;
-      document.getElementById('themeToggle').textContent = next === 'dark' ? '\\ud83c\\udf19' : '\\u2600\\ufe0f';
+      document.getElementById('themeToggle').textContent = next === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
       localStorage.setItem('slidecraft-theme', next);
     }
     (function initTheme() {
       const saved = localStorage.getItem('slidecraft-theme');
       if (saved) {
         document.documentElement.dataset.theme = saved;
-        document.getElementById('themeToggle').textContent = saved === 'dark' ? '\\ud83c\\udf19' : '\\u2600\\ufe0f';
+        document.getElementById('themeToggle').textContent = saved === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
       }
     })();
 
@@ -629,7 +648,7 @@ export class PreviewServer {
     .search-bar { flex: 1; max-width: 720px; margin: 0 40px; position: relative; }
     .search-bar input { width: 100%; padding: 12px 16px 12px 48px; border-radius: 8px; border: none; background: var(--h-input-bg); font-size: 16px; color: var(--h-text); outline: none; transition: box-shadow 0.2s; }
     .search-bar input:focus { background: var(--h-bg); box-shadow: 0 1px 6px rgba(32,33,36,0.28); }
-    .search-bar::before { content: '\\ud83d\\udd0d'; position: absolute; left: 16px; top: 50%; transform: translateY(-50%); font-size: 18px; opacity: 0.5; }
+    .search-bar::before { content: '\ud83d\udd0d'; position: absolute; left: 16px; top: 50%; transform: translateY(-50%); font-size: 18px; opacity: 0.5; }
     .header-actions { display: flex; align-items: center; gap: 12px; }
     .status-badge { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; background: #e8f5e9; color: #2e7d32; font-size: 13px; font-weight: 500; }
     .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; animation: pulse 2s infinite; }
@@ -701,34 +720,34 @@ export class PreviewServer {
       <div class="logo-text"><span>SlideCraft</span> <span class="version-badge">v2</span></div>
     </div>
     <div class="search-bar">
-      <input type="text" placeholder="\\u691c\\u7d22" id="searchInput" oninput="filterDecks()" />
+      <input type="text" placeholder="\u691c\u7d22" id="searchInput" oninput="filterDecks()" />
     </div>
     <div class="header-actions">
-      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="\\u30c6\\u30fc\\u30de\\u5207\\u66ff">\\u2600\\ufe0f</button>
-      <div class="status-badge"><div class="dot"></div>MCP\\u63a5\\u7d9a\\u4e2d</div>
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="\u30c6\u30fc\u30de\u5207\u66ff">\u2600\ufe0f</button>
+      <div class="status-badge"><div class="dot"></div>MCP\u63a5\u7d9a\u4e2d</div>
     </div>
   </div>
 
   <div class="section-recent">
     <div class="section-header">
-      <h2>\\u6700\\u8fd1\\u4f7f\\u7528\\u3057\\u305f\\u30d7\\u30ec\\u30bc\\u30f3\\u30c6\\u30fc\\u30b7\\u30e7\\u30f3</h2>
-      <button class="create-btn" onclick="openCreateModal()">+ \\u65b0\\u898f\\u4f5c\\u6210</button>
+      <h2>\u6700\u8fd1\u4f7f\u7528\u3057\u305f\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3</h2>
+      <button class="create-btn" onclick="openCreateModal()">+ \u65b0\u898f\u4f5c\u6210</button>
     </div>
     <div class="decks-grid" id="decksGrid"></div>
     <div class="empty-state" id="emptyState" style="display:none">
-      <div class="icon">\\ud83c\\udfa8</div>
-      <h3>\\u30d7\\u30ec\\u30bc\\u30f3\\u30c6\\u30fc\\u30b7\\u30e7\\u30f3\\u304c\\u307e\\u3060\\u3042\\u308a\\u307e\\u305b\\u3093</h3>
-      <p>\\u300c+ \\u65b0\\u898f\\u4f5c\\u6210\\u300d\\u30dc\\u30bf\\u30f3\\u307e\\u305f\\u306fClaude Code\\u306eMCP\\u30c4\\u30fc\\u30eb\\u3067\\u30d7\\u30ec\\u30bc\\u30f3\\u30c6\\u30fc\\u30b7\\u30e7\\u30f3\\u3092\\u4f5c\\u6210\\u3057\\u307e\\u3057\\u3087\\u3046\\u3002</p>
+      <div class="icon">\ud83c\udfa8</div>
+      <h3>\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093</h3>
+      <p>\u300c+ \u65b0\u898f\u4f5c\u6210\u300d\u30dc\u30bf\u30f3\u307e\u305f\u306fClaude Code\u306eMCP\u30c4\u30fc\u30eb\u3067\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u3092\u4f5c\u6210\u3057\u307e\u3057\u3087\u3046\u3002</p>
     </div>
   </div>
 
   <div class="modal-bg" id="createModal">
     <div class="modal">
-      <h3>\\u65b0\\u898f\\u30d7\\u30ec\\u30bc\\u30f3\\u30c6\\u30fc\\u30b7\\u30e7\\u30f3</h3>
-      <input type="text" id="newDeckTitle" placeholder="\\u30bf\\u30a4\\u30c8\\u30eb\\u3092\\u5165\\u529b" autofocus />
+      <h3>\u65b0\u898f\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3</h3>
+      <input type="text" id="newDeckTitle" placeholder="\u30bf\u30a4\u30c8\u30eb\u3092\u5165\u529b" autofocus />
       <div class="modal-actions">
-        <button class="btn-cancel" onclick="closeCreateModal()">\\u30ad\\u30e3\\u30f3\\u30bb\\u30eb</button>
-        <button class="btn-primary" onclick="createNewDeck()">\\u4f5c\\u6210</button>
+        <button class="btn-cancel" onclick="closeCreateModal()">\u30ad\u30e3\u30f3\u30bb\u30eb</button>
+        <button class="btn-primary" onclick="createNewDeck()">\u4f5c\u6210</button>
       </div>
     </div>
   </div>
@@ -741,10 +760,10 @@ export class PreviewServer {
       const now = new Date();
       const diffMs = now.getTime() - d.getTime();
       const diffMins = Math.floor(diffMs / 60000);
-      if (diffMins < 1) return '\\u305f\\u3063\\u305f\\u4eca';
-      if (diffMins < 60) return diffMins + '\\u5206\\u524d';
+      if (diffMins < 1) return '\u305f\u3063\u305f\u4eca';
+      if (diffMins < 60) return diffMins + '\u5206\u524d';
       const diffHours = Math.floor(diffMins / 60);
-      if (diffHours < 24) return diffHours + '\\u6642\\u9593\\u524d';
+      if (diffHours < 24) return diffHours + '\u6642\u9593\u524d';
       return d.getFullYear() + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + String(d.getDate()).padStart(2,'0');
     }
 
@@ -755,14 +774,14 @@ export class PreviewServer {
       empty.style.display = 'none'; grid.style.display = '';
       grid.innerHTML = allDecks.map(d => '<a href="/preview/' + d.id + '" class="deck-card" data-id="' + d.id + '">'
         + '<div class="card-overlay">'
-        + '<button class="overlay-btn copy-id-btn" onclick="copyId(event,\\'' + d.id + '\\')" title="ID\\u3092\\u30b3\\u30d4\\u30fc">\\ud83d\\udccb ' + d.id + '</button>'
-        + '<button class="overlay-btn delete-btn" onclick="deleteDeck(event,\\'' + d.id + '\\')" title="\\u524a\\u9664">\\ud83d\\uddd1</button>'
+        + '<button class="overlay-btn copy-id-btn" onclick="copyId(event,\\'' + d.id + '\\')" title="ID\u3092\u30b3\u30d4\u30fc">\ud83d\udccb ' + d.id + '</button>'
+        + '<button class="overlay-btn delete-btn" onclick="deleteDeck(event,\\'' + d.id + '\\')" title="\u524a\u9664">\ud83d\uddd1</button>'
         + '</div>'
         + '<div class="deck-thumb"><iframe src="/api/decks/' + d.id + '/thumbnail" loading="lazy" scrolling="no"></iframe></div>'
         + '<div class="deck-info">'
         + '<div class="deck-title-row">'
         + '<span class="deck-title">' + escHtml(d.title) + '</span>'
-        + '<button class="edit-title-btn" onclick="startEditTitle(event,\\'' + d.id + '\\')" title="\\u540d\\u524d\\u3092\\u5909\\u66f4">\\u270f\\ufe0f</button>'
+        + '<button class="edit-title-btn" onclick="startEditTitle(event,\\'' + d.id + '\\')" title="\u540d\u524d\u3092\u5909\u66f4">\u270f\ufe0f</button>'
         + '</div>'
         + '<div class="deck-meta"><span class="deck-badge">' + d.slides + ' slides</span><span class="deck-date">' + formatDate(d.updatedAt) + '</span></div>'
         + '</div></a>').join('');
@@ -800,15 +819,15 @@ export class PreviewServer {
       e.preventDefault(); e.stopPropagation();
       navigator.clipboard.writeText(id).then(() => {
         const btn = e.currentTarget;
-        btn.textContent = '\\u2713 \\u30b3\\u30d4\\u30fc\\u6e08\\u307f';
-        setTimeout(() => { btn.textContent = '\\ud83d\\udccb ' + id; }, 1500);
+        btn.textContent = '\u2713 \u30b3\u30d4\u30fc\u6e08\u307f';
+        setTimeout(() => { btn.textContent = '\ud83d\udccb ' + id; }, 1500);
       });
     }
 
     // Delete deck
     function deleteDeck(e, id) {
       e.preventDefault(); e.stopPropagation();
-      if (!confirm('\\u3053\\u306e\\u30d7\\u30ec\\u30bc\\u30f3\\u30c6\\u30fc\\u30b7\\u30e7\\u30f3\\u3092\\u524a\\u9664\\u3057\\u307e\\u3059\\u304b\\uff1f')) return;
+      if (!confirm('\u3053\u306e\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u3092\u524a\u9664\u3057\u307e\u3059\u304b\uff1f')) return;
       fetch('/api/decks/' + id, { method: 'DELETE' })
         .then(() => { const idx = allDecks.findIndex(d => d.id === id); if (idx >= 0) allDecks.splice(idx, 1); renderDecks(); });
     }
@@ -858,14 +877,14 @@ export class PreviewServer {
       const html = document.documentElement;
       const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
       html.dataset.theme = next;
-      document.getElementById('themeToggle').textContent = next === 'dark' ? '\\ud83c\\udf19' : '\\u2600\\ufe0f';
+      document.getElementById('themeToggle').textContent = next === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
       localStorage.setItem('slidecraft-theme', next);
     }
     (function initTheme() {
       const saved = localStorage.getItem('slidecraft-theme');
       if (saved) {
         document.documentElement.dataset.theme = saved;
-        document.getElementById('themeToggle').textContent = saved === 'dark' ? '\\ud83c\\udf19' : '\\u2600\\ufe0f';
+        document.getElementById('themeToggle').textContent = saved === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
       }
     })();
 

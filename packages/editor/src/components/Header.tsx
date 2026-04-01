@@ -144,11 +144,11 @@ export default function Header() {
               3. 使い方
             </h3>
             <p style={{ fontSize: 13, color: '#94a3b8', lineHeight: 1.8 }}>
-              MCP接続後、Claude Codeに「プレゼンを作成して」と伝えるだけ。  
+              MCP接続後、Claude Codeに「プレゼンを作成して」と伝えるだけ。
               AIがツールを呼び出し、このエディタにリアルタイムで反映されます。
             </p>
 
-            <a href="https://github.com/Nisss78/slidecraft#readme" target="blank" rel="noopener noreferrer"
+            <a href="https://github.com/Nisss78/slidecraft#readme" target="_blank" rel="noopener noreferrer"
               style={{ display: 'inline-block', marginTop: 16, color: '#6366f1', fontSize: 13, textDecoration: 'none', borderBottom: '1px solid #6366f1' }}>
               GitHubで詳しく見る →
             </a>

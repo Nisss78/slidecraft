@@ -16,7 +16,7 @@
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "build": "turbo run build",
-    "dev": "turbo run dev",
+    "dev": "turbo run dev & node packages/mcp-server/dist/index.js",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
@@ -28,5 +28,9 @@
     "prettier": "^3.4.0",
     "turbo": "^2.3.0",
     "typescript": "^5.7.0"
-  }
+  },
+  "workspaces": [
+    "packages/*",
+    "plugins/*"
+  ]
 }
