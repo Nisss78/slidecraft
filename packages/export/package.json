@@ -20,6 +20,7 @@
   "dependencies": {
     "@slidecraft/core": "workspace:*",
     "@slidecraft/renderer": "workspace:*",
+    "cheerio": "^1.0.0",
     "pptxgenjs": "^3.12.0"
   },
   "optionalDependencies": {

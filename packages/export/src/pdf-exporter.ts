@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Deck } from '@slidecraft/core';
 import { getAspectRatioDimensions } from '@slidecraft/renderer';
@@ -16,7 +16,7 @@ async function getPlaywright() {
 
 /**
  * v2: Export deck as PDF.
- * Requires pre-loaded slide HTML content.
+ * Uses screenshot-based approach for accurate CSS rendering (including gradients).
  */
 export async function exportToPdf(
   deck: Deck,
@@ -33,33 +33,60 @@ export async function exportToPdf(
     const page = await context.newPage();
     await page.setViewportSize(dims);
 
-    const fullHtml = `<!DOCTYPE html>
+    // Take screenshots of each slide
+    const screenshotBuffers: Buffer[] = [];
+    for (const html of slideHtmls) {
+      await page.setContent(html, { waitUntil: 'networkidle' });
+      const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+      screenshotBuffers.push(screenshot);
+    }
+
+    await browser.close();
+
+    // Create PDF with embedded images
+    const slideImages = screenshotBuffers.map((buf, i) => {
+      const base64 = buf.toString('base64');
+      return `<div class="slide-page"><img src="data:image/png;base64,${base64}" alt="Slide ${i + 1}"></div>`;
+    }).join('\n');
+
+    const pdfHtml = `<!DOCTYPE html>
 <html><head>
+<meta charset="UTF-8">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   @page { size: ${dims.width}px ${dims.height}px; margin: 0; }
-  .page-break { page-break-after: always; }
-  .slide-page { width: ${dims.width}px; height: ${dims.height}px; overflow: hidden; }
+  .slide-page {
+    width: ${dims.width}px;
+    height: ${dims.height}px;
+    page-break-after: always;
+  }
+  .slide-page:last-child { page-break-after: auto; }
+  .slide-page img {
+    width: ${dims.width}px;
+    height: ${dims.height}px;
+    object-fit: contain;
+  }
 </style>
 </head><body>
-${slideHtmls.map((html, i) => {
-  // Extract body content from full HTML, or use as-is
-  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
-  const bodyContent = bodyMatch ? bodyMatch[1] : html;
-  return `<div class="slide-page ${i < slideHtmls.length - 1 ? 'page-break' : ''}">${bodyContent}</div>`;
-}).join('\n')}
+${slideImages}
 </body></html>`;
 
-    await page.setContent(fullHtml, { waitUntil: 'networkidle' });
+    // Re-launch browser to create PDF from images
+    const browser2 = await pw.chromium.launch();
+    const context2 = await browser2.newContext();
+    const page2 = await context2.newPage();
+    await page2.setViewportSize(dims);
+
+    await page2.setContent(pdfHtml, { waitUntil: 'networkidle' });
     await mkdir(dirname(outputPath), { recursive: true });
-    await page.pdf({
+    await page2.pdf({
       path: outputPath,
       width: `${dims.width}px`,
       height: `${dims.height}px`,
       printBackground: true,
     });
 
-    await browser.close();
+    await browser2.close();
     return { success: true, outputPath, format: 'pdf' };
   } catch (err) {
     return {
