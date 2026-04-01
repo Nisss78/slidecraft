@@ -1,0 +1,19 @@
+{
+  "id": "pitch-deck",
+  "name": "Pitch Deck",
+  "description": "Startup pitch deck template with 10 slides",
+  "theme": "minimal",
+  "aspectRatio": "16:9",
+  "slides": [
+    { "layout": "title", "hint": "Company name + tagline" },
+    { "layout": "content", "hint": "Problem statement" },
+    { "layout": "content", "hint": "Solution overview" },
+    { "layout": "image-left", "hint": "Product demo / screenshot" },
+    { "layout": "content", "hint": "Market size (TAM/SAM/SOM)" },
+    { "layout": "content", "hint": "Business model" },
+    { "layout": "two-column", "hint": "Traction / metrics" },
+    { "layout": "content", "hint": "Competition / differentiation" },
+    { "layout": "two-column", "hint": "Team" },
+    { "layout": "title", "hint": "Ask / Contact info" }
+  ]
+}

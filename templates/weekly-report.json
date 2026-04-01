@@ -1,0 +1,15 @@
+{
+  "id": "weekly-report",
+  "name": "Weekly Report",
+  "description": "Weekly status report template",
+  "theme": "corporate",
+  "aspectRatio": "16:9",
+  "slides": [
+    { "layout": "title", "hint": "Week of [date] - Status Report" },
+    { "layout": "content", "hint": "Summary / Highlights" },
+    { "layout": "two-column", "hint": "Achievements + Metrics" },
+    { "layout": "content", "hint": "Challenges / Blockers" },
+    { "layout": "content", "hint": "Next week's plan" },
+    { "layout": "title", "hint": "Questions / Discussion" }
+  ]
+}

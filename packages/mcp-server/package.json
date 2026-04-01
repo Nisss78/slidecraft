@@ -1,0 +1,40 @@
+{
+  "name": "@slidecraft/mcp-server",
+  "version": "0.1.0",
+  "description": "SlideCraft MCP server with built-in HTTP/WebSocket preview server",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "slidecraft": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@slidecraft/core": "workspace:*",
+    "@slidecraft/plugin-api": "workspace:*",
+    "@slidecraft/renderer": "workspace:*",
+    "@slidecraft/export": "workspace:*",
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "open": "^10.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.7.0"
+  }
+}

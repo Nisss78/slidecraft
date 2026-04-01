@@ -1,0 +1,19 @@
+{
+  "id": "tech-talk",
+  "name": "Tech Talk",
+  "description": "Technical presentation template",
+  "theme": "dark",
+  "aspectRatio": "16:9",
+  "slides": [
+    { "layout": "title", "hint": "Talk title + speaker info" },
+    { "layout": "content", "hint": "Agenda / Outline" },
+    { "layout": "content", "hint": "Background / Context" },
+    { "layout": "content", "hint": "Core concept #1" },
+    { "layout": "two-column", "hint": "Code example + explanation" },
+    { "layout": "content", "hint": "Core concept #2" },
+    { "layout": "content", "hint": "Demo / Architecture diagram" },
+    { "layout": "content", "hint": "Lessons learned" },
+    { "layout": "content", "hint": "Key takeaways" },
+    { "layout": "title", "hint": "Q&A + links" }
+  ]
+}

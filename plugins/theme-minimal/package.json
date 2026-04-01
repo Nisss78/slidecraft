@@ -1,0 +1,19 @@
+{
+  "name": "slidecraft-theme-minimal",
+  "version": "0.1.0",
+  "description": "Minimal theme for SlideCraft",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@slidecraft/plugin-api": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "keywords": ["slidecraft", "theme", "minimal"]
+}
