@@ -1,77 +1,158 @@
 # SlideCraft
 
-Local AI-powered slide generation tool with MCP server integration.
-
-Generate beautiful presentations from natural language prompts using Claude Code, with real-time browser preview and plugin extensibility.
+MCP-powered presentation builder with HTML-first architecture.  
+AI（MCPクライアント）と協調して、HTMLスライドをリアルタイムに作成・プレビューできるプレゼンテーションツールです。
 
 ## Features
 
-- **AI Slide Generation** - Create full presentations from text prompts via MCP tools
-- **Real-time Preview** - Live browser preview with WebSocket updates
-- **Plugin System** - Extensible themes, layouts, elements, and exporters
-- **Multiple Export Formats** - PDF, PPTX, PNG, HTML
-- **Git-friendly** - JSON-based storage for version control
+- **HTML-first slides** — 各スライドは生のHTMLで記述。自由度の高いデザインが可能
+- **MCP integration** — Claude Code等のMCPクライアントからスライドを操作
+- **Real-time preview** — WebSocket経由でスライドの変更をリアルタイムにプレビュー
+- **Multi-slide support** — 複数スライドの追加・削除・並び替え
+- **Export** — スライドをスタンドアロンHTMLファイルとしてエクスポート
+
+## Architecture
+
+```
+slidecraft/
+├── packages/
+│   ├── editor/          # React + Vite フロントエンド（スライドエディタ）
+│   └── mcp-server/      # MCPサーバー（AIからのスライド操作API）
+└── scripts/             # デモデータ・シードスクリプト
+```
+
+- **editor**: React (Vite) 製のスライドエディタ。WebSocketでMCPサーバーと通信
+- **mcp-server**: Model Context Protocolサーバー。スライドのCRUD操作を提供
 
 ## Quick Start
 
+### Prerequisites
+
+- Node.js 18+
+- pnpm
+
+### Install
+
 ```bash
-# Install
+git clone https://github.com/Nisss78/slidecraft.git
+cd slidecraft
 pnpm install
-
-# Build all packages
-pnpm build
-
-# Start the MCP server with preview
-pnpm --filter @slidecraft/mcp-server dev
 ```
 
-### Claude Code Integration
+### Build & Run
 
-Add to your Claude Code MCP settings:
+```bash
+pnpm build
+
+# MCPサーバーを起動（プレビューサーバーも同時起動）
+pnpm --filter mcp-server start
+
+# エディタを開発モードで起動
+pnpm --filter editor dev
+```
+
+エディタは `http://localhost:5173` で起動します。
+
+## MCP接続方法
+
+SlideCraftのMCPサーバーをClaude Code等のMCPクライアントに接続する方法を説明します。
+
+### Claude Code
+
+`~/.claude/settings.json` またはプロジェクトの `.claude/settings.json` に以下を追加します：
 
 ```json
 {
   "mcpServers": {
     "slidecraft": {
       "command": "node",
-      "args": ["path/to/slidecraft/packages/mcp-server/dist/index.js"]
+      "args": ["/path/to/slidecraft/packages/mcp-server/dist/index.js"],
+      "env": {
+        "PORT": "3100"
+      }
     }
   }
 }
 ```
 
-Then use MCP tools:
+### MCP Tools
+
+SlideCraftのMCPサーバーは以下のツールを提供します：
+
+| ツール | 説明 |
+|--------|------|
+| `create_presentation` | 新しいプレゼンテーションを作成 |
+| `add_slide` | スライドを追加 |
+| `update_slide` | スライドの内容を更新 |
+| `delete_slide` | スライドを削除 |
+| `list_slides` | スライド一覧を取得 |
+| `reorder_slides` | スライドの順序を変更 |
+| `export_presentation` | HTMLファイルとしてエクスポート |
+
+### 使用例
+
+Claude Codeに接続後、以下のようにスライドを作成できます：
 
 ```
-create_deck(title: "My Presentation", theme: "minimal")
-add_slide(deckId: "...", layout: "title", elements: [...])
-preview(deckId: "...")
+プレゼンテーションを作成して
+タイトル: スタートアップ pitch deck
+スライド構成:
+1. タイトルスライド
+2. 課題
+3. ソリューション
+4. ビジネスモデル
+5. チーム
 ```
 
-## Architecture
+MCPクライアントが自動的にツールを呼び出し、エディタにリアルタイムで反映されます。
+
+## Development
+
+### Project Structure
 
 ```
-Claude Code ──stdio──► MCP Server ──WebSocket──► Browser Editor
-                           │
-                           ├── Plugin System
-                           ├── JSON File Storage
-                           └── HTTP API
+packages/editor/
+├── src/
+│   ├── components/
+│   │   ├── Header.tsx          # ヘッダー（タイトル・ツールバー）
+│   │   ├── SlidePanel.tsx      # スライド一覧パネル
+│   │   ├── SlideEditor.tsx     # スライドHTMLエディタ
+│   │   └── EditorToolbar.tsx   # エディタツールバー
+│   ├── hooks/
+│   │   └── useWebSocket.ts     # WebSocket通信フック
+│   ├── store.ts                # Zustandステート管理
+│   ├── types/
+│   │   └── index.ts            # 型定義
+│   └── App.tsx                 # アプリケーションルート
+└── index.html
+
+packages/mcp-server/
+├── src/
+│   ├── index.ts                # MCPサーバーエントリーポイント
+│   └── preview-server.ts       # プレビューHTTP+WSサーバー
+└── package.json
 ```
 
-## Packages
+### Commands
 
-| Package | Description |
-|---------|-------------|
-| `@slidecraft/core` | Data models, validation, storage |
-| `@slidecraft/mcp-server` | MCP server + HTTP/WS preview server |
-| `@slidecraft/editor` | React browser UI |
-| `@slidecraft/renderer` | Slide → HTML/CSS engine |
-| `@slidecraft/export` | PDF/PPTX/PNG export |
-| `@slidecraft/plugin-api` | Plugin interface definitions |
+```bash
+# 開発モード（ウォッチ）
+pnpm --filter editor dev
+pnpm --filter mcp-server dev
 
-## Plugin Development
+# ビルド
+pnpm build
 
-See [Plugin Development Guide](docs/plugin-development.md) for creating custom themes, layouts, and exporters.
+# デモデータの投入
+node scripts/seed-demo.mjs
+```
+
+## Tech Stack
+
+- **Frontend**: React 19, Vite, TypeScript, Zustand
+- **MCP Server**: TypeScript, @modelcontextprotocol/sdk
+- **Communication**: WebSocket (リアルタイム同期)
+- **Styling**: CSS（カスタムプロパティ使用）
 
 ## License
 
