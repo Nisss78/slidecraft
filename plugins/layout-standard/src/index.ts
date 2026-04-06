@@ -1,7 +1,7 @@
-import type { SlideCraftPlugin, PluginContext } from '@slidecraft/plugin-api';
+import type { SlideHarnessPlugin, PluginContext } from '@slideharness/plugin-api';
 
-const plugin: SlideCraftPlugin = {
-  name: 'slidecraft-layout-standard',
+const plugin: SlideHarnessPlugin = {
+  name: 'slideharness-layout-standard',
   version: '0.1.0',
   type: 'layout',
   register(ctx: PluginContext) {

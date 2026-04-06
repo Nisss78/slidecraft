@@ -1,12 +1,12 @@
 {
-  "name": "slidecraft-layout-standard",
+  "name": "slideharness-layout-standard",
   "version": "0.1.0",
-  "description": "Standard layout collection for SlideCraft",
+  "description": "Standard layout collection for Slide Harness",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": { "build": "tsc", "clean": "rm -rf dist" },
-  "dependencies": { "@slidecraft/plugin-api": "workspace:*" },
+  "dependencies": { "@slideharness/plugin-api": "workspace:*" },
   "devDependencies": { "typescript": "^5.7.0" },
-  "keywords": ["slidecraft", "layout"]
+  "keywords": ["slideharness", "layout"]
 }

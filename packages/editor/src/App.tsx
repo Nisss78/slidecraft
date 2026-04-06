@@ -1,33 +1,55 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useEditorStore } from './store';
 import { useWebSocket } from './hooks/useWebSocket';
 import { Header } from './components/Header';
 import { SlidePanel } from './components/SlidePanel';
 import { SlideEditor } from './components/SlideEditor';
 import { EditorToolbar } from './components/EditorToolbar';
+import { HomeScreen } from './components/HomeScreen';
 
 function SlideView({ deckId, slideId }: { deckId: string; slideId: string }) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(0.5);
+
+  useEffect(() => {
+    const update = () => {
+      const frame = frameRef.current;
+      if (!frame) return;
+      const cw = frame.clientWidth - 28;
+      const ch = frame.clientHeight - 28;
+      if (cw <= 0 || ch <= 0) return;
+      const zoomByWidth = cw / 1920;
+      const zoomByHeight = ch / 1080;
+      setZoom(Math.min(zoomByWidth, zoomByHeight));
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    if (frameRef.current) ro.observe(frameRef.current);
+    window.addEventListener('resize', update);
+    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
+  }, []);
+
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#f3f4f6' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#f3f4f6', minWidth: 0 }}>
       <div
+        ref={frameRef}
         style={{
           flex: 1,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          padding: 32,
+          padding: 12,
           overflow: 'hidden',
         }}
       >
         <div
           style={{
-            width: 960,
-            height: 540,
-            borderRadius: 4,
+            flexShrink: 0,
+            borderRadius: 8,
             overflow: 'hidden',
-            boxShadow: '0 4px 24px rgba(0,0,0,0.12)',
-            position: 'relative',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
             background: '#fff',
+            lineHeight: 0,
           }}
         >
           <iframe
@@ -36,8 +58,8 @@ function SlideView({ deckId, slideId }: { deckId: string; slideId: string }) {
               width: 1920,
               height: 1080,
               border: 'none',
-              transform: 'scale(0.5)',
-              transformOrigin: 'top left',
+              display: 'block',
+              zoom: zoom,
               pointerEvents: 'none',
             }}
             title="Slide Preview"
@@ -53,6 +75,7 @@ export function App() {
   const currentSlideIndex = useEditorStore((s) => s.currentSlideIndex);
   const connected = useEditorStore((s) => s.connected);
   const editing = useEditorStore((s) => s.editing);
+  const dirty = useEditorStore((s) => s.dirty);
   const setEditing = useEditorStore((s) => s.setEditing);
   const setCurrentSlide = useEditorStore((s) => s.setCurrentSlide);
   const setDeck = useEditorStore((s) => s.setDeck);
@@ -126,24 +149,27 @@ export function App() {
     setEditing(false);
   }, [setEditing]);
 
+  // Arrow key navigation
+  useEffect(() => {
+    if (!deck) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't interfere with input/textarea/select or iframe editing
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'IFRAME') return;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        setCurrentSlide(Math.max(0, currentSlideIndex - 1));
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setCurrentSlide(Math.min(deck.slides.length - 1, currentSlideIndex + 1));
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [deck, currentSlideIndex, setCurrentSlide]);
+
   if (!deckId) {
-    return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: '100vh',
-        flexDirection: 'column',
-        gap: 16,
-        background: '#fff',
-      }}>
-        <h1 style={{ fontSize: 48, fontWeight: 700, color: '#6366f1' }}>SlideCraft</h1>
-        <p style={{ color: '#6b7280', fontSize: 18 }}>AI-powered slide generation</p>
-        <p style={{ color: '#9ca3af', fontSize: 14, marginTop: 24 }}>
-          Use MCP tools to create a deck, then add <code style={{ color: '#6366f1', background: '#f3f4f6', padding: '2px 6px', borderRadius: 4 }}>?deck=DECK_ID</code> to the URL
-        </p>
-      </div>
-    );
+    return <HomeScreen />;
   }
 
   if (!deck) {
@@ -170,11 +196,12 @@ export function App() {
         theme={deck.theme}
         connected={connected}
         editing={editing}
+        dirty={dirty}
         onEdit={handleEdit}
         onSave={handleSave}
         deckId={deck.id}
       />
-      {editing && <EditorToolbar iframeRef={iframeRef} />}
+      {editing && <EditorToolbar iframeRef={iframeRef} deckId={deck.id} />}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <SlidePanel
           slides={deck.slides}

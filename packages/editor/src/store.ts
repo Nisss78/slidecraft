@@ -33,6 +33,8 @@ const defaultSelection: SelectionState = {
   blockType: 'p',
   orderedList: false,
   unorderedList: false,
+  undoAvailable: false,
+  redoAvailable: false,
 };
 
 interface EditorState {
@@ -52,6 +54,8 @@ interface EditorState {
   iframeReady: boolean;
   undoAvailable: boolean;
   redoAvailable: boolean;
+  blockEditing: boolean;
+  selectedBlockIndex: number | null;
 
   // Existing actions
   setDeck: (deck: Deck) => void;
@@ -67,6 +71,8 @@ interface EditorState {
   setSaving: (saving: boolean) => void;
   setIframeReady: (ready: boolean) => void;
   setUndoRedo: (undo: boolean, redo: boolean) => void;
+  setBlockEditing: (editing: boolean) => void;
+  setSelectedBlockIndex: (index: number | null) => void;
   saveCurrentSlide: (deckId: string, slideId: string, html: string) => Promise<void>;
 }
 
@@ -79,7 +85,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   error: null,
 
   // Editing state
-  editing: false,
+  editing: true,
   dirty: false,
   saving: false,
   lastSavedAt: null,
@@ -87,6 +93,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   iframeReady: false,
   undoAvailable: false,
   redoAvailable: false,
+  blockEditing: false,
+  selectedBlockIndex: null,
 
   // Existing actions
   setDeck: (deck) => set({ deck, error: null }),
@@ -102,6 +110,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setSaving: (saving) => set({ saving }),
   setIframeReady: (ready) => set({ iframeReady: ready }),
   setUndoRedo: (undo, redo) => set({ undoAvailable: undo, redoAvailable: redo }),
+  setBlockEditing: (editing) => set({ blockEditing: editing }),
+  setSelectedBlockIndex: (index) => set({ selectedBlockIndex: index }),
 
   saveCurrentSlide: async (deckId, slideId, html) => {
     const state = get();

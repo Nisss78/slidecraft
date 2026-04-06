@@ -1,13 +1,13 @@
 {
-  "name": "slidecraft",
+  "name": "slideharness",
   "version": "0.1.0",
   "private": true,
   "description": "Local AI-powered slide generation tool with MCP server integration",
-  "author": "SlideCraft Contributors",
+  "author": "Slide Harness Contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/slidecraft/slidecraft.git"
+    "url": "https://github.com/Nisss78/slidecraft.git"
   },
   "engines": {
     "node": ">=20.0.0",
@@ -16,6 +16,7 @@
   "packageManager": "pnpm@9.15.4",
   "scripts": {
     "build": "turbo run build",
+    "start": "pnpm build && node packages/mcp-server/dist/index.js",
     "dev": "turbo run dev & node packages/mcp-server/dist/index.js",
     "lint": "turbo run lint",
     "test": "turbo run test",

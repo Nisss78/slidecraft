@@ -1,9 +1,9 @@
-# Getting Started with SlideCraft
+# Getting Started with Slide Harness
 
 ## Installation
 
 ```bash
-git clone https://github.com/slidecraft/slidecraft.git
+git clone https://github.com/Nisss78/slidecraft.git
 cd slidecraft
 pnpm install
 pnpm build
@@ -16,9 +16,9 @@ Add to your MCP settings (`~/.claude/claude_desktop_config.json` or similar):
 ```json
 {
   "mcpServers": {
-    "slidecraft": {
+    "slideharness": {
       "command": "node",
-      "args": ["/path/to/slidecraft/packages/mcp-server/dist/index.js"]
+      "args": ["/path/to/slideharness/packages/mcp-server/dist/index.js"]
     }
   }
 }
@@ -35,7 +35,7 @@ Add to your MCP settings (`~/.claude/claude_desktop_config.json` or similar):
    ```
    add_slide(deckId: "xxx", elements: [
      { type: "text", content: "Hello World", position: { x: 10, y: 30, width: 80, height: 20 }, style: { fontSize: 56, fontWeight: "bold", textAlign: "center" } },
-     { type: "text", content: "My first SlideCraft presentation", position: { x: 15, y: 55, width: 70, height: 10 }, style: { fontSize: 24, textAlign: "center", color: "#666" } }
+     { type: "text", content: "My first Slide Harness presentation", position: { x: 15, y: 55, width: 70, height: 10 }, style: { fontSize: 24, textAlign: "center", color: "#666" } }
    ])
    ```
 

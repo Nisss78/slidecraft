@@ -1,6 +1,6 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { Deck } from '@slidecraft/core';
+import type { Deck } from '@slideharness/core';
 import type { ExportResult } from './types.js';
 
 /**

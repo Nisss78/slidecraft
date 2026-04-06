@@ -1,7 +1,7 @@
 {
-  "name": "slidecraft-theme-minimal",
+  "name": "slideharness-theme-minimal",
   "version": "0.1.0",
-  "description": "Minimal theme for SlideCraft",
+  "description": "Minimal theme for Slide Harness",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,10 +10,10 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@slidecraft/plugin-api": "workspace:*"
+    "@slideharness/plugin-api": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0"
   },
-  "keywords": ["slidecraft", "theme", "minimal"]
+  "keywords": ["slideharness", "theme", "minimal"]
 }

@@ -6,5 +6,9 @@ dist/
 .env.local
 .DS_Store
 coverage/
-.slidecraft/
+.slideharness/
 *.log
+.claude/
+.slidecraft/
+.playwright-mcp/
+mcp-setup/

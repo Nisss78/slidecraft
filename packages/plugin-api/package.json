@@ -1,7 +1,7 @@
 {
-  "name": "@slidecraft/plugin-api",
+  "name": "@slideharness/plugin-api",
   "version": "0.1.0",
-  "description": "SlideCraft plugin interface definitions",
+  "description": "Slide Harness plugin interface definitions",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,7 +18,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@slidecraft/core": "workspace:*"
+    "@slideharness/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

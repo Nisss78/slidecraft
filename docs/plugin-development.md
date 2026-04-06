@@ -4,19 +4,19 @@
 
 | Type | Description | Naming Convention |
 |------|-------------|-------------------|
-| `theme` | Colors, fonts, styles | `slidecraft-theme-*` |
-| `layout` | Slide layout definitions | `slidecraft-layout-*` |
-| `element` | Custom element renderers | `slidecraft-element-*` |
-| `exporter` | Output format plugins | `slidecraft-exporter-*` |
-| `transformer` | Input format converters | `slidecraft-transformer-*` |
+| `theme` | Colors, fonts, styles | `slideharness-theme-*` |
+| `layout` | Slide layout definitions | `slideharness-layout-*` |
+| `element` | Custom element renderers | `slideharness-element-*` |
+| `exporter` | Output format plugins | `slideharness-exporter-*` |
+| `transformer` | Input format converters | `slideharness-transformer-*` |
 
 ## Creating a Theme Plugin
 
 ```typescript
-import type { SlideCraftPlugin, PluginContext } from '@slidecraft/plugin-api';
+import type { SlideHarnessPlugin, PluginContext } from '@slideharness/plugin-api';
 
-const plugin: SlideCraftPlugin = {
-  name: 'slidecraft-theme-neon',
+const plugin: SlideHarnessPlugin = {
+  name: 'slideharness-theme-neon',
   version: '1.0.0',
   type: 'theme',
   register(ctx: PluginContext) {
@@ -75,7 +75,7 @@ ctx.registerLayout({
 
 ## Publishing
 
-1. Create a package with `slidecraft-` prefix
-2. Export a default `SlideCraftPlugin` object
+1. Create a package with `slideharness-` prefix
+2. Export a default `SlideHarnessPlugin` object
 3. Publish to npm
-4. Users install and configure in their SlideCraft setup
+4. Users install and configure in their Slide Harness setup

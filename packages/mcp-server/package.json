@@ -1,40 +1,51 @@
 {
-  "name": "@slidecraft/mcp-server",
+  "name": "slideharness",
   "version": "0.1.0",
-  "description": "SlideCraft MCP server with built-in HTTP/WebSocket preview server",
+  "description": "Slide Harness MCP server with built-in HTTP/WebSocket preview server",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "slidecraft": "./dist/index.js"
+    "slideharness": "./dist/bundle.js"
   },
+  "files": [
+    "dist/bundle.js"
+  ],
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
+    "bundle": "node build.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "node build.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "@slidecraft/core": "workspace:*",
-    "@slidecraft/plugin-api": "workspace:*",
-    "@slidecraft/renderer": "workspace:*",
-    "@slidecraft/export": "workspace:*",
     "express": "^4.21.0",
+    "jszip": "^3.10.1",
     "ws": "^8.18.0",
     "open": "^10.1.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@slideharness/core": "workspace:*",
+    "@slideharness/editor": "workspace:*",
+    "@slideharness/plugin-api": "workspace:*",
+    "@slideharness/renderer": "workspace:*",
+    "@slideharness/export": "workspace:*",
     "@types/express": "^5.0.0",
     "@types/ws": "^8.5.0",
+    "esbuild": "^0.25.0",
     "typescript": "^5.7.0"
   }
 }

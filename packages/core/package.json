@@ -1,7 +1,7 @@
 {
-  "name": "@slidecraft/core",
+  "name": "@slideharness/core",
   "version": "0.1.0",
-  "description": "SlideCraft core data models, validation, and storage",
+  "description": "Slide Harness core data models, validation, and storage",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -1,9 +1,9 @@
-# Contributing to SlideCraft
+# Contributing to Slide Harness
 
 ## Development Setup
 
 ```bash
-git clone https://github.com/slidecraft/slidecraft.git
+git clone https://github.com/Nisss78/slidecraft.git
 cd slidecraft
 pnpm install
 pnpm build

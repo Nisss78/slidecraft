@@ -1,12 +1,12 @@
 {
-  "name": "slidecraft-theme-corporate",
+  "name": "slideharness-theme-corporate",
   "version": "0.1.0",
-  "description": "Professional corporate theme for SlideCraft",
+  "description": "Professional corporate theme for Slide Harness",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": { "build": "tsc", "clean": "rm -rf dist" },
-  "dependencies": { "@slidecraft/plugin-api": "workspace:*" },
+  "dependencies": { "@slideharness/plugin-api": "workspace:*" },
   "devDependencies": { "typescript": "^5.7.0" },
-  "keywords": ["slidecraft", "theme", "corporate"]
+  "keywords": ["slideharness", "theme", "corporate"]
 }

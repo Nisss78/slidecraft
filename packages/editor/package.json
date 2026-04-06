@@ -1,8 +1,8 @@
 {
-  "name": "@slidecraft/editor",
+  "name": "@slideharness/editor",
   "version": "0.1.0",
   "private": true,
-  "description": "SlideCraft browser-based slide editor",
+  "description": "Slide Harness browser-based slide editor",
   "type": "module",
   "scripts": {
     "dev": "vite",

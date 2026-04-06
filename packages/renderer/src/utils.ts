@@ -1,4 +1,4 @@
-import type { AspectRatio } from '@slidecraft/core';
+import type { AspectRatio } from '@slideharness/core';
 
 export interface Dimensions {
   width: number;

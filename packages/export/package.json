@@ -1,7 +1,7 @@
 {
-  "name": "@slidecraft/export",
+  "name": "@slideharness/export",
   "version": "0.1.0",
-  "description": "SlideCraft export engine (PDF, PNG, HTML)",
+  "description": "Slide Harness export engine (PDF, PNG, HTML)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,9 +18,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@slidecraft/core": "workspace:*",
-    "@slidecraft/renderer": "workspace:*",
-    "cheerio": "^1.0.0",
+    "@slideharness/core": "workspace:*",
+    "@slideharness/renderer": "workspace:*",
+    "jszip": "^3.10.1",
+    "pdf-lib": "^1.17.1",
     "pptxgenjs": "^3.12.0"
   },
   "optionalDependencies": {

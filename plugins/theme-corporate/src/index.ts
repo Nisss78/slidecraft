@@ -1,7 +1,7 @@
-import type { SlideCraftPlugin, PluginContext } from '@slidecraft/plugin-api';
+import type { SlideHarnessPlugin, PluginContext } from '@slideharness/plugin-api';
 
-const plugin: SlideCraftPlugin = {
-  name: 'slidecraft-theme-corporate',
+const plugin: SlideHarnessPlugin = {
+  name: 'slideharness-theme-corporate',
   version: '0.1.0',
   type: 'theme',
   register(ctx: PluginContext) {

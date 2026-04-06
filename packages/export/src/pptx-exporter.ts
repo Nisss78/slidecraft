@@ -1,9 +1,22 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import * as cheerio from 'cheerio';
-import type { Deck } from '@slidecraft/core';
-import { getAspectRatioDimensions } from '@slidecraft/renderer';
+import type { Deck } from '@slideharness/core';
+import { getAspectRatioDimensions } from '@slideharness/renderer';
 import type { ExportResult } from './types.js';
+
+// =============================================================================
+// Dynamic Imports
+// =============================================================================
+
+async function getPlaywright() {
+  try {
+    return await import('playwright');
+  } catch {
+    throw new Error(
+      'Playwright is required for PPTX export. Install it with: pnpm add playwright && npx playwright install chromium',
+    );
+  }
+}
 
 async function getPptxGenJs() {
   try {
@@ -20,79 +33,89 @@ async function getPptxGenJs() {
 // Types
 // =============================================================================
 
-interface ComputedStyle {
-  // Text
-  color: string;
+interface ExtractedTextElement {
+  text: string;
+  x: number; // px
+  y: number; // px
+  width: number; // px
+  height: number; // px
+  fontSize: number; // px
   fontFamily: string;
-  fontSize: number; // pt
   fontWeight: number;
-  fontStyle: 'normal' | 'italic';
-  textAlign: 'left' | 'center' | 'right';
-  lineHeight: number;
-
-  // Layout
-  display: string;
-  flexDirection?: string;
-  justifyContent?: string;
-  alignItems?: string;
-  gap?: number;
-
-  // Position & Size
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-
-  // Background
-  backgroundColor?: string;
-
-  // Border
-  borderLeft?: { width: number; color: string };
-  borderRadius?: number;
-
-  // Padding/Margin
-  paddingTop: number;
-  paddingRight: number;
-  paddingBottom: number;
-  paddingLeft: number;
+  fontStyle: string;
+  color: string; // rgb(r, g, b) or rgba(...)
+  textAlign: string;
+  lineHeight: number; // px
 }
 
-interface ParsedElement {
-  type: 'text' | 'rect' | 'shape';
-  tagName: string;
-  text?: string;
-  style: ComputedStyle;
-  children?: ParsedElement[];
-}
-
-interface SlideContent {
-  background: string;
-  elements: ParsedElement[];
+interface SlideProcessResult {
+  screenshot: Buffer;
+  textElements: ExtractedTextElement[];
 }
 
 // =============================================================================
-// CSS Parsing Utilities
+// Font Fallback
 // =============================================================================
 
-const CSS_UNIT_TO_PT: Record<string, number> = {
-  px: 0.75, // 1px = 0.75pt
-  rem: 12, // 1rem = 12pt (assuming 16px base)
-  em: 12,
-  pt: 1,
+const FONT_FALLBACK: Record<string, string> = {
+  'Noto Sans JP': 'Yu Gothic',
+  'Hiragino Mincho Pro': 'Yu Mincho',
+  'Hiragino Mincho ProN': 'Yu Mincho',
+  'Hiragino Sans': 'Yu Gothic',
+  'Hiragino Kaku Gothic ProN': 'Yu Gothic',
+  Inter: 'Calibri',
+  'system-ui': 'Calibri',
+  '-apple-system': 'Calibri',
+  BlinkMacSystemFont: 'Calibri',
+  'Segoe UI': 'Segoe UI',
+  Roboto: 'Calibri',
+  'Helvetica Neue': 'Arial',
+  Helvetica: 'Arial',
+  'sans-serif': 'Calibri',
+  'serif': 'Times New Roman',
+  'monospace': 'Courier New',
 };
 
 /**
- * Parse CSS color to hex format (without #)
+ * Resolve CSS font-family to a PPTX-safe font name.
+ * Takes the first font in the stack and maps through fallback table.
  */
-function parseColor(color: string | undefined): string {
-  if (!color) return '000000';
+function resolveFontFamily(cssFontFamily: string): string {
+  // Parse CSS font-family: may be comma-separated, may include quotes
+  const fonts = cssFontFamily.split(',').map((f) => f.trim().replace(/['"]/g, ''));
 
-  // Already hex
-  if (color.startsWith('#')) {
-    return color.replace('#', '');
+  for (const font of fonts) {
+    if (FONT_FALLBACK[font]) {
+      return FONT_FALLBACK[font];
+    }
+    // If the font name looks like a real font (not a generic), use it directly
+    if (font && !['system-ui', '-apple-system', 'BlinkMacSystemFont'].includes(font)) {
+      return font;
+    }
   }
 
-  // rgb/rgba
+  return 'Calibri';
+}
+
+// =============================================================================
+// Unit Conversion
+// =============================================================================
+
+/** Convert px to inches based on viewport and slide dimensions */
+function pxToInches(px: number, viewportPx: number, slideInches: number): number {
+  return (px / viewportPx) * slideInches;
+}
+
+/** Convert CSS px font size to PowerPoint points (1px = 0.75pt) */
+function pxToPt(px: number): number {
+  return Math.round(px * 0.75);
+}
+
+/**
+ * Parse CSS color string to hex (without #) for pptxgenjs.
+ */
+function cssColorToHex(color: string): string {
+  // Handle rgb/rgba
   const rgbMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
   if (rgbMatch) {
     const r = parseInt(rgbMatch[1]).toString(16).padStart(2, '0');
@@ -101,530 +124,268 @@ function parseColor(color: string | undefined): string {
     return r + g + b;
   }
 
-  // Named colors
-  const namedColors: Record<string, string> = {
-    white: 'FFFFFF',
-    black: '000000',
-    red: 'FF0000',
-    green: '00FF00',
-    blue: '0000FF',
-    yellow: 'FFFF00',
-    transparent: 'FFFFFF',
-  };
-
-  return namedColors[color.toLowerCase()] || '000000';
-}
-
-/**
- * Parse CSS length to points
- */
-function parseLength(value: string | undefined, defaultPt: number = 0): number {
-  if (!value) return defaultPt;
-
-  // Extract number and unit
-  const match = value.match(/^([\d.]+)(px|rem|em|pt|%)?/);
-  if (!match) return defaultPt;
-
-  const num = parseFloat(match[1]);
-  const unit = match[2] || 'px';
-
-  if (unit === '%') {
-    return num; // Return percentage as-is, caller must handle
-  }
-
-  return num * (CSS_UNIT_TO_PT[unit] || 0.75);
-}
-
-/**
- * Parse CSS font-size to points
- */
-function parseFontSize(fontSize: string | undefined, defaultSize: number = 18): number {
-  if (!fontSize) return defaultSize;
-
-  // Handle large rem values (like 5rem for h1)
-  if (fontSize.endsWith('rem')) {
-    const rem = parseFloat(fontSize);
-    // 1rem = 16px typically, and 1px = 0.75pt
-    return Math.round(rem * 16 * 0.75);
-  }
-
-  return parseLength(fontSize, defaultSize);
-}
-
-/**
- * Parse inline style string to object
- */
-function parseInlineStyle(styleStr: string): Record<string, string> {
-  const styles: Record<string, string> = {};
-
-  if (!styleStr) return styles;
-
-  styleStr.split(';').forEach((pair) => {
-    const [key, value] = pair.split(':').map((s) => s.trim());
-    if (key && value) {
-      // Convert kebab-case to camelCase for easier access
-      const camelKey = key.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-      styles[camelKey] = value;
+  // Handle hex
+  if (color.startsWith('#')) {
+    const hex = color.replace('#', '');
+    if (hex.length === 3) {
+      return hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
     }
-  });
-
-  return styles;
-}
-
-/**
- * Extract background from style (handles gradients)
- */
-function extractBackground(styles: Record<string, string>): string {
-  const bg = styles.background || styles.backgroundColor;
-  if (!bg) return 'FFFFFF';
-
-  // Handle linear-gradient - extract first color
-  const gradientMatch = bg.match(/linear-gradient\([^,]+,\s*(#[a-fA-F0-9]+)/);
-  if (gradientMatch) {
-    return gradientMatch[1].replace('#', '');
+    return hex.substring(0, 6);
   }
 
-  // Handle solid color
-  return parseColor(bg);
+  return '000000';
 }
 
 // =============================================================================
-// HTML Parsing with Cheerio
+// Icon Class Detection
+// =============================================================================
+
+const ICON_CLASSES = ['fas', 'fab', 'far', 'fa-solid', 'fa-brands', 'fa-regular', 'material-icons', 'material-symbols-outlined'];
+
+// =============================================================================
+// Browser-side Text Extraction (runs inside page.evaluate)
 // =============================================================================
 
 /**
- * Get default styles for HTML elements
+ * Script executed inside the browser to extract text elements and their computed styles.
  */
-function getDefaultStyles(tagName: string): Partial<ComputedStyle> {
-  const defaults: Record<string, Partial<ComputedStyle>> = {
-    h1: {
-      fontSize: 44,
-      fontWeight: 700,
-      textAlign: 'center',
-      color: 'FFFFFF',
-    },
-    h2: {
-      fontSize: 32,
-      fontWeight: 700,
-      textAlign: 'center',
-      color: 'FFFFFF',
-    },
-    h3: {
-      fontSize: 24,
-      fontWeight: 600,
-      textAlign: 'left',
-      color: 'FFFFFF',
-    },
-    h4: {
-      fontSize: 20,
-      fontWeight: 600,
-      textAlign: 'left',
-      color: 'FFFFFF',
-    },
-    p: {
-      fontSize: 18,
-      fontWeight: 400,
-      textAlign: 'left',
-      color: 'CCCCCC',
-    },
-    div: {
-      fontSize: 18,
-      fontWeight: 400,
-      textAlign: 'left',
-      color: 'FFFFFF',
-    },
-  };
+function extractTextElementsScript(iconClasses: string[]): ExtractedTextElement[] {
+  const TEXT_TAGS = new Set([
+    'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'P', 'SPAN', 'A', 'LI', 'TD', 'TH',
+    'STRONG', 'EM', 'B', 'I', 'U', 'S',
+    'LABEL', 'FIGCAPTION', 'BLOCKQUOTE', 'PRE', 'CODE',
+  ]);
 
-  return defaults[tagName] || defaults.p;
-}
+  const results: ExtractedTextElement[] = [];
+  const processedRects = new Set<string>();
 
-/**
- * Compute element style by merging defaults, class styles, and inline styles
- */
-function computeElementStyle(
-  $el: cheerio.Cheerio<any>,
-  tagName: string,
-  parentBounds: { x: number; y: number; w: number; h: number },
-  slideWidth: number,
-  slideHeight: number,
-): ComputedStyle {
-  const defaults = getDefaultStyles(tagName);
-  const inlineStyles = parseInlineStyle($el.attr('style') || '');
-  const classAttr = $el.attr('class') || '';
-
-  // Merge font styles
-  const fontSize = parseFontSize(inlineStyles.fontSize, defaults.fontSize || 18);
-  const fontWeight = inlineStyles.fontWeight
-    ? parseInt(inlineStyles.fontWeight)
-    : (defaults.fontWeight || 400);
-
-  // Determine position based on element type and parent
-  let x = parentBounds.x;
-  let y = parentBounds.y;
-  let w = parentBounds.w;
-  let h = fontSize * 1.5 / 72; // Estimate height based on font size
-
-  // Handle specific layout patterns
-  if (tagName === 'h1') {
-    // Title: center top
-    x = slideWidth * 0.1;
-    y = slideHeight * 0.1;
-    w = slideWidth * 0.8;
-    h = 1;
-  } else if (tagName === 'h2') {
-    // Subtitle
-    x = slideWidth * 0.1;
-    y = slideHeight * 0.25;
-    w = slideWidth * 0.8;
-    h = 0.8;
-  } else if (tagName === 'p') {
-    // Paragraph
-    x = slideWidth * 0.1;
-    w = slideWidth * 0.8;
-    h = 0.5;
+  function isIconElement(el: Element): boolean {
+    for (const cls of iconClasses) {
+      if (el.classList.contains(cls)) return true;
+    }
+    // Check if element has Font Awesome content via ::before
+    const before = window.getComputedStyle(el, '::before');
+    if (before.fontFamily && before.fontFamily.includes('Font Awesome')) return true;
+    return false;
   }
 
-  // Handle text alignment from inline style
-  const textAlign = (inlineStyles.textAlign as 'left' | 'center' | 'right') ||
-    defaults.textAlign || 'left';
-
-  // Handle color
-  const color = inlineStyles.color
-    ? parseColor(inlineStyles.color)
-    : (defaults.color || 'FFFFFF');
-
-  // Handle background
-  const backgroundColor = inlineStyles.backgroundColor || inlineStyles.background
-    ? parseColor(inlineStyles.backgroundColor || inlineStyles.background)
-    : undefined;
-
-  // Check for highlight class
-  const isHighlight = classAttr.includes('highlight');
-  const isSubtitle = classAttr.includes('subtitle');
-
-  return {
-    color,
-    fontFamily: 'Arial',
-    fontSize,
-    fontWeight,
-    fontStyle: inlineStyles.fontStyle === 'italic' ? 'italic' : 'normal',
-    textAlign,
-    lineHeight: 1.2,
-
-    display: inlineStyles.display || 'block',
-    flexDirection: inlineStyles.flexDirection,
-    justifyContent: inlineStyles.justifyContent,
-    alignItems: inlineStyles.alignItems,
-
-    x,
-    y,
-    w,
-    h,
-
-    backgroundColor: isHighlight ? '1a1a2e' : backgroundColor,
-
-    paddingTop: 0,
-    paddingRight: 0,
-    paddingBottom: 0,
-    paddingLeft: 0,
-  };
-}
-
-/**
- * Parse a single element and its children recursively
- */
-function parseElement(
-  $: cheerio.CheerioAPI,
-  el: any,
-  parentBounds: { x: number; y: number; w: number; h: number },
-  slideWidth: number,
-  slideHeight: number,
-  yOffset: { value: number },
-): ParsedElement | null {
-  const $el = $(el);
-  const tagName = el.tagName?.toLowerCase();
-
-  if (!tagName) return null;
-
-  // Skip non-visual elements
-  if (['script', 'style', 'meta', 'link', 'head', 'title'].includes(tagName)) {
-    return null;
+  function isTextLeaf(el: Element): boolean {
+    // An element is a "text leaf" if it has direct text content
+    // and no child elements that themselves contain text
+    for (const child of el.children) {
+      if (TEXT_TAGS.has(child.tagName) && child.textContent?.trim()) {
+        return false; // Has a text-bearing child, so this is not a leaf
+      }
+    }
+    return true;
   }
 
-  const style = computeElementStyle($el, tagName, parentBounds, slideWidth, slideHeight);
-
-  // Update y position based on current offset
-  style.y = parentBounds.y + yOffset.value;
-
-  // Get text content
-  const text = $el.text().trim();
-
-  // Determine element type
-  let type: 'text' | 'rect' | 'shape' = 'text';
-
-  if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'a', 'li'].includes(tagName)) {
-    type = 'text';
-  } else if (tagName === 'i' && $el.hasClass('fas')) {
-    // FontAwesome icon - treat as shape
-    type = 'shape';
+  function getDirectText(el: Element): string {
+    let text = '';
+    for (const node of el.childNodes) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += node.textContent || '';
+      }
+    }
+    return text.trim();
   }
 
-  // Parse children if this is a container
-  const children: ParsedElement[] = [];
-  if (tagName === 'div' || tagName === 'section' || tagName === 'article') {
-    let childYOffset = 0;
-    $el.children().each((_, child) => {
-      const parsed = parseElement(
-        $,
-        child,
-        { x: style.x, y: style.y, w: style.w, h: style.h },
-        slideWidth,
-        slideHeight,
-        { value: childYOffset },
-      );
-      if (parsed) {
-        children.push(parsed);
-        // Estimate height for next sibling
-        if (parsed.style.h) {
-          childYOffset += parsed.style.h + 0.1;
+  function walk(el: Element): void {
+    // Skip invisible elements
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return;
+    }
+
+    // Skip icon elements (they'll be captured in the background screenshot)
+    if (isIconElement(el)) return;
+
+    if (TEXT_TAGS.has(el.tagName) && isTextLeaf(el)) {
+      const text = el.textContent?.trim();
+      if (!text) return;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+
+      // Dedup by position (rounded)
+      const key = `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)}`;
+      if (processedRects.has(key)) return;
+      processedRects.add(key);
+
+      results.push({
+        text,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        fontSize: parseFloat(style.fontSize),
+        fontFamily: style.fontFamily,
+        fontWeight: parseInt(style.fontWeight) || 400,
+        fontStyle: style.fontStyle,
+        color: style.color,
+        textAlign: style.textAlign,
+        lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2,
+      });
+      return; // Don't recurse into leaves
+    }
+
+    // Recurse into children
+    for (const child of el.children) {
+      walk(child);
+    }
+
+    // For non-TEXT_TAG elements, check if they have direct text (e.g., <div>Hello</div>)
+    if (!TEXT_TAGS.has(el.tagName)) {
+      const directText = getDirectText(el);
+      if (directText) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          const key = `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)}`;
+          if (!processedRects.has(key)) {
+            processedRects.add(key);
+            results.push({
+              text: directText,
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              fontSize: parseFloat(style.fontSize),
+              fontFamily: style.fontFamily,
+              fontWeight: parseInt(style.fontWeight) || 400,
+              fontStyle: style.fontStyle,
+              color: style.color,
+              textAlign: style.textAlign,
+              lineHeight: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2,
+            });
+          }
         }
       }
-    });
-  }
-
-  // Update y offset for siblings
-  if (type === 'text' && text) {
-    yOffset.value += style.h + 0.1;
-  }
-
-  return {
-    type,
-    tagName,
-    text,
-    style,
-    children: children.length > 0 ? children : undefined,
-  };
-}
-
-/**
- * Flatten parsed elements into a linear list
- */
-function flattenElements(elements: ParsedElement[]): ParsedElement[] {
-  const result: ParsedElement[] = [];
-
-  for (const el of elements) {
-    if (el.text && el.type === 'text') {
-      result.push(el);
-    }
-    if (el.children) {
-      result.push(...flattenElements(el.children));
     }
   }
 
-  return result;
+  walk(document.body);
+  return results;
 }
 
 /**
- * Parse HTML slide content using cheerio
+ * Script executed inside the browser to hide all text by setting color to transparent.
+ * Space is preserved so layout doesn't shift.
  */
-function parseSlideHtml(
-  html: string,
-  widthInches: number,
-  heightInches: number,
-): SlideContent {
-  const $ = cheerio.load(html);
-  const result: SlideContent = {
-    background: 'FFFFFF',
-    elements: [],
-  };
+function hideTextForScreenshotScript(iconClasses: string[]): void {
+  const TEXT_TAGS = new Set([
+    'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'P', 'SPAN', 'A', 'LI', 'TD', 'TH',
+    'STRONG', 'EM', 'B', 'I', 'U', 'S',
+    'LABEL', 'FIGCAPTION', 'BLOCKQUOTE', 'PRE', 'CODE',
+  ]);
 
-  // Extract background from body style or embedded CSS
-  const bodyStyle = $('body').attr('style') || '';
-  const bodyStyles = parseInlineStyle(bodyStyle);
-  result.background = extractBackground(bodyStyles);
+  function isIconElement(el: Element): boolean {
+    for (const cls of iconClasses) {
+      if (el.classList.contains(cls)) return true;
+    }
+    const before = window.getComputedStyle(el, '::before');
+    if (before.fontFamily && before.fontFamily.includes('Font Awesome')) return true;
+    return false;
+  }
 
-  // Also check for embedded style tags
-  $('style').each((_, el) => {
-    const css = $(el).html() || '';
-    // Look for body background
-    const bodyBgMatch = css.match(/body\s*\{[^}]*background[^:]*:\s*([^;}\n]+)/i);
-    if (bodyBgMatch) {
-      const bg = extractBackground({ background: bodyBgMatch[1] });
-      if (bg !== 'FFFFFF') {
-        result.background = bg;
+  function walk(el: Element): void {
+    if (isIconElement(el)) return; // Keep icons visible
+
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none') return;
+
+    if (TEXT_TAGS.has(el.tagName) || el.childNodes.length > 0) {
+      // Check if this element has direct text nodes
+      let hasDirectText = false;
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+          hasDirectText = true;
+          break;
+        }
+      }
+      if (hasDirectText) {
+        (el as HTMLElement).style.color = 'transparent';
+        // Also hide text-shadow and text-decoration
+        (el as HTMLElement).style.textShadow = 'none';
+        (el as HTMLElement).style.textDecorationColor = 'transparent';
+        (el as HTMLElement).style.webkitTextFillColor = 'transparent';
       }
     }
 
-    // Look for gradient backgrounds
-    const gradientMatch = css.match(/background:\s*linear-gradient\([^,]+,\s*(#[a-fA-F0-9]+)/);
-    if (gradientMatch) {
-      result.background = gradientMatch[1].replace('#', '');
+    for (const child of el.children) {
+      walk(child);
     }
-  });
-
-  // Parse body content
-  const bodyBounds = {
-    x: 0,
-    y: 0,
-    w: widthInches,
-    h: heightInches,
-  };
-
-  const processedTexts = new Set<string>(); // Track processed texts to avoid duplicates
-  let currentY = heightInches * 0.1; // Start position
-
-  // First, get h1 (main title)
-  $('body h1').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    if (text) {
-      const style = computeElementStyle($el, 'h1', bodyBounds, widthInches, heightInches);
-      style.y = currentY;
-      result.elements.push({
-        type: 'text',
-        tagName: 'h1',
-        text,
-        style,
-      });
-      processedTexts.add(text);
-      currentY += style.h + 0.2;
-    }
-  });
-
-  // Get h2 (subtitle) - usually at body level
-  $('body > h2').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    if (text && !processedTexts.has(text)) {
-      const style = computeElementStyle($el, 'h2', bodyBounds, widthInches, heightInches);
-      style.y = currentY;
-      result.elements.push({
-        type: 'text',
-        tagName: 'h2',
-        text,
-        style,
-      });
-      processedTexts.add(text);
-      currentY += style.h + 0.15;
-    }
-  });
-
-  // Get p.en (English subtitle) - special class at body level
-  $('body > p.en, body > p.subtitle').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    if (text && !processedTexts.has(text)) {
-      const style = computeElementStyle($el, 'p', bodyBounds, widthInches, heightInches);
-      style.y = currentY;
-      style.fontSize = 20;
-      style.color = 'CCCCCC';
-      style.textAlign = 'center';
-      result.elements.push({
-        type: 'text',
-        tagName: 'p',
-        text,
-        style,
-      });
-      processedTexts.add(text);
-      currentY += style.h + 0.3;
-    }
-  });
-
-  // Move down for content area
-  currentY = Math.max(currentY, heightInches * 0.35);
-
-  // Get paragraphs inside .text containers (excluding .highlight)
-  $('.text p').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    if (text && !processedTexts.has(text)) {
-      const tagName = el.tagName?.toLowerCase() || 'p';
-
-      const style = computeElementStyle($el, tagName, bodyBounds, widthInches, heightInches);
-      style.y = currentY;
-      style.x = widthInches * 0.1;
-      style.w = widthInches * 0.8;
-      style.textAlign = 'left';
-
-      result.elements.push({
-        type: 'text',
-        tagName,
-        text,
-        style,
-      });
-      processedTexts.add(text);
-      currentY += style.h + 0.15;
-    }
-  });
-
-  // Get highlight boxes
-  $('.highlight').each((_, el) => {
-    const $el = $(el);
-    const text = $el.text().trim();
-    if (text && !processedTexts.has(text)) {
-      const style = computeElementStyle($el, 'div', bodyBounds, widthInches, heightInches);
-      style.y = currentY;
-      style.x = widthInches * 0.1;
-      style.w = widthInches * 0.8;
-      style.fontSize = 14;
-      style.color = 'FFFFFF';
-      result.elements.push({
-        type: 'text',
-        tagName: 'div',
-        text,
-        style,
-      });
-      processedTexts.add(text);
-      currentY += style.h + 0.2;
-    }
-  });
-
-  return result;
-}
-
-// =============================================================================
-// PPTX Generation
-// =============================================================================
-
-/**
- * Add a parsed element to a PowerPoint slide
- */
-function addElementToSlide(
-  slide: any,
-  element: ParsedElement,
-): void {
-  const { style, text } = element;
-
-  if (element.type === 'text' && text) {
-    slide.addText(text, {
-      x: style.x,
-      y: style.y,
-      w: style.w,
-      h: style.h,
-      fontSize: style.fontSize,
-      fontFace: style.fontFamily,
-      color: style.color,
-      bold: style.fontWeight >= 600,
-      italic: style.fontStyle === 'italic',
-      align: style.textAlign,
-      valign: 'middle',
-      wrap: true,
-    });
-  } else if (element.type === 'shape') {
-    // Add icon as a simple shape (placeholder)
-    slide.addShape('circle', {
-      x: style.x,
-      y: style.y,
-      w: 0.5,
-      h: 0.5,
-      fill: { color: style.color },
-    });
   }
+
+  walk(document.body);
+}
+
+// =============================================================================
+// Slide Processing (2-Pass Hybrid)
+// =============================================================================
+
+/**
+ * Load HTML into the page and wait for fonts, CSS, and Tailwind to fully render.
+ */
+async function waitForFontsAndRender(
+  page: import('playwright').Page,
+  html: string,
+  dims: { width: number; height: number },
+): Promise<void> {
+  await page.setViewportSize(dims);
+  await page.setContent(html, { waitUntil: 'networkidle' });
+
+  // Wait for all web fonts to finish loading
+  await page.evaluate(() => document.fonts.ready);
+
+  // Allow Tailwind JIT / dynamic CSS generation to settle
+  await page.waitForTimeout(200);
 }
 
 /**
- * Export deck as editable PPTX.
- * Parses HTML content and creates native PowerPoint elements.
+ * Process a single slide: extract text elements + capture background screenshot.
+ * This is the core of the 2-Pass Hybrid approach:
+ *  1. Render HTML fully in browser
+ *  2. Extract text positions and computed styles
+ *  3. Hide text (color:transparent) to keep layout but remove visible text
+ *  4. Screenshot the background (all visual elements except text)
+ */
+async function processSlide(
+  page: import('playwright').Page,
+  html: string,
+  dims: { width: number; height: number },
+): Promise<SlideProcessResult> {
+  // Step 1: Render HTML fully
+  await waitForFontsAndRender(page, html, dims);
+
+  // Step 2: Extract text elements with computed styles
+  const textElements = await page.evaluate(extractTextElementsScript, ICON_CLASSES);
+
+  // Step 3: Hide text for background screenshot
+  await page.evaluate(hideTextForScreenshotScript, ICON_CLASSES);
+
+  // Step 4: Take screenshot of background (text hidden)
+  const screenshot = await page.screenshot({ type: 'png' });
+
+  return { screenshot, textElements };
+}
+
+// =============================================================================
+// Main Export Function
+// =============================================================================
+
+/**
+ * Export deck as editable PPTX using 2-Pass Hybrid approach.
+ *
+ * For each slide:
+ * 1. Render HTML in Playwright browser
+ * 2. Extract text elements with getComputedStyle() for accurate positions/styles
+ * 3. Hide text and capture background screenshot
+ * 4. In PPTX: set background = screenshot image, overlay native editable text boxes
+ *
+ * This preserves 100% visual fidelity for backgrounds/gradients/images/SVGs
+ * while keeping text natively editable in PowerPoint.
  */
 export async function exportToPptx(
   deck: Deck,
@@ -633,34 +394,92 @@ export async function exportToPptx(
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
 ): Promise<ExportResult> {
   try {
-    const PptxGenJS = await getPptxGenJs();
+    const [pw, PptxGenJS] = await Promise.all([getPlaywright(), getPptxGenJs()]);
     const dims = getAspectRatioDimensions(aspectRatio);
+
+    // PPTX slide dimensions in inches (standard 96 DPI)
+    const slideWidthInches = dims.width / 96; // 20 inches for 1920px
+    const slideHeightInches = dims.height / 96; // 11.25 inches for 1080px
+
+    // Launch browser with 2x scale for high-res background images
+    const browser = await pw.chromium.launch();
+    const context = await browser.newContext({
+      deviceScaleFactor: 2,
+    });
+    const page = await context.newPage();
 
     // Create PPTX
     const pptx = new PptxGenJS();
-    // Set slide dimensions in inches (96 DPI)
-    const widthInches = dims.width / 96;
-    const heightInches = dims.height / 96;
-    pptx.defineLayout({ name: 'CUSTOM', width: widthInches, height: heightInches });
+    pptx.defineLayout({ name: 'CUSTOM', width: slideWidthInches, height: slideHeightInches });
     pptx.layout = 'CUSTOM';
     pptx.title = deck.title;
-    pptx.author = deck.author || 'SlideCraft';
+    pptx.author = deck.author || 'Slide Harness';
 
     // Process each slide
     for (let i = 0; i < slideHtmls.length; i++) {
-      const html = slideHtmls[i];
-      const parsed = parseSlideHtml(html, widthInches, heightInches);
+      const { screenshot, textElements } = await processSlide(page, slideHtmls[i], dims);
 
       const slide = pptx.addSlide();
 
-      // Set background
-      slide.background = { color: parsed.background };
+      // Set background to screenshot image (captures gradients, images, SVGs, icons, etc.)
+      const base64 = screenshot.toString('base64');
+      slide.background = { data: `image/png;base64,${base64}` };
 
-      // Add elements
-      for (const el of parsed.elements) {
-        addElementToSlide(slide, el);
+      // Add native editable text boxes
+      for (const el of textElements) {
+        // Convert px positions to inches
+        const x = pxToInches(el.x, dims.width, slideWidthInches);
+        const y = pxToInches(el.y, dims.height, slideHeightInches);
+        const w = pxToInches(el.width, dims.width, slideWidthInches);
+        const h = pxToInches(el.height, dims.height, slideHeightInches);
+
+        // Skip elements outside the visible area
+        if (x + w < 0 || y + h < 0 || x > slideWidthInches || y > slideHeightInches) {
+          continue;
+        }
+
+        // Skip very small text elements (likely hidden or decorative)
+        if (el.fontSize < 6) continue;
+
+        const fontSize = pxToPt(el.fontSize);
+        const fontFace = resolveFontFamily(el.fontFamily);
+        const color = cssColorToHex(el.color);
+        const bold = el.fontWeight >= 600;
+        const italic = el.fontStyle === 'italic';
+
+        // Map CSS text-align to pptxgenjs align
+        let align: 'left' | 'center' | 'right' | 'justify' = 'left';
+        if (el.textAlign === 'center' || el.textAlign === '-webkit-center') {
+          align = 'center';
+        } else if (el.textAlign === 'right') {
+          align = 'right';
+        } else if (el.textAlign === 'justify') {
+          align = 'justify';
+        }
+
+        slide.addText(el.text, {
+          x,
+          y,
+          w,
+          h,
+          fontSize,
+          fontFace,
+          color,
+          bold,
+          italic,
+          align,
+          valign: 'top',
+          wrap: true,
+          // Transparent fill so background image shows through
+          fill: { color: 'FFFFFF', transparency: 100 },
+          // No margin/padding to match browser layout precisely
+          margin: 0,
+        });
       }
     }
+
+    // Close browser
+    await browser.close();
 
     // Save PPTX
     await mkdir(dirname(outputPath), { recursive: true });

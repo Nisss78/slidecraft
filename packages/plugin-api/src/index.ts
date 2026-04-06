@@ -1,9 +1,9 @@
-import type { Slide, Deck } from '@slidecraft/core';
+import type { Slide, Deck } from '@slideharness/core';
 
 // === Plugin Types ===
 export type PluginType = 'theme' | 'layout' | 'exporter' | 'transformer';
 
-export interface SlideCraftPlugin {
+export interface SlideHarnessPlugin {
   name: string;
   version: string;
   type: PluginType;
@@ -27,6 +27,7 @@ export interface ThemeTypography {
   bodyFont: string;
   codeFont: string;
   baseFontSize: number;
+  headingWeight?: number;
 }
 
 export interface Theme {
@@ -36,6 +37,7 @@ export interface Theme {
   colors: ThemeColors;
   typography: ThemeTypography;
   styles?: Record<string, string>;
+  accentShape?: { type: 'circle' | 'none'; opacity?: number };
 }
 
 // === Layout ===
@@ -94,9 +96,9 @@ export class PluginRegistry implements PluginContext {
   private layouts = new Map<string, Layout>();
   private exporters = new Map<string, Exporter>();
   private transformers = new Map<string, Transformer>();
-  private plugins: SlideCraftPlugin[] = [];
+  private plugins: SlideHarnessPlugin[] = [];
 
-  async loadPlugin(plugin: SlideCraftPlugin): Promise<void> {
+  async loadPlugin(plugin: SlideHarnessPlugin): Promise<void> {
     await plugin.register(this);
     this.plugins.push(plugin);
   }
@@ -145,7 +147,7 @@ export class PluginRegistry implements PluginContext {
     return Array.from(this.exporters.values());
   }
 
-  getPlugins(): SlideCraftPlugin[] {
+  getPlugins(): SlideHarnessPlugin[] {
     return [...this.plugins];
   }
 }
