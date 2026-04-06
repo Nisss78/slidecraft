@@ -76,11 +76,12 @@ export async function exportToPdf(
   outputPath: string,
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
 ): Promise<ExportResult> {
+  let browser: import('playwright').Browser | undefined;
   try {
     const pw = await getPlaywright();
     const dims = getAspectRatioDimensions(aspectRatio);
 
-    const browser = await pw.chromium.launch();
+    browser = await pw.chromium.launch();
     const context = await browser.newContext();
     const page = await context.newPage();
 
@@ -100,6 +101,7 @@ export async function exportToPdf(
     }
 
     await browser.close();
+    browser = undefined;
 
     // Merge all per-slide PDFs into one document
     const mergedPdf = await PDFDocument.create();
@@ -124,6 +126,8 @@ export async function exportToPdf(
       format: 'pdf',
       error: err instanceof Error ? err.message : 'Unknown error',
     };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
@@ -137,11 +141,12 @@ export async function exportToPng(
   outputDir: string,
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
 ): Promise<ExportResult> {
+  let browser: import('playwright').Browser | undefined;
   try {
     const pw = await getPlaywright();
     const dims = getAspectRatioDimensions(aspectRatio);
 
-    const browser = await pw.chromium.launch();
+    browser = await pw.chromium.launch();
     const context = await browser.newContext({
       deviceScaleFactor: 2,
     });
@@ -158,6 +163,7 @@ export async function exportToPng(
     }
 
     await browser.close();
+    browser = undefined;
     return { success: true, outputPath: outputDir, format: 'png' };
   } catch (err) {
     return {
@@ -166,5 +172,7 @@ export async function exportToPng(
       format: 'png',
       error: err instanceof Error ? err.message : 'Unknown error',
     };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }

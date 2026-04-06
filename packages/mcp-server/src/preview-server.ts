@@ -504,12 +504,8 @@ export class PreviewServer {
       const outPath = join(tmpdir(), `slideharness-${deck.id}-${Date.now()}.pdf`);
       const result = await exportToPdf(deck, slideHtmls, outPath);
       if (!result.success) {
-        res.status(500).send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>エクスポートエラー</title></head>
-<body><script>
-  alert('PDFエクスポートに失敗しました: ${escHtml(result.error ?? '不明なエラー')}');
-  history.back();
-</script></body></html>`);
+        unlink(outPath).catch(() => {});
+        res.status(500).json({ error: result.error ?? '不明なエラー' });
         return;
       }
       res.download(outPath, `${deck.title}.pdf`, () => { unlink(outPath).catch(() => {}); });
@@ -528,12 +524,8 @@ export class PreviewServer {
       const outPath = join(tmpdir(), `slideharness-${deck.id}-${Date.now()}.pptx`);
       const result = await exportToPptx(deck, slideHtmls, outPath);
       if (!result.success) {
-        res.status(500).send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>エクスポートエラー</title></head>
-<body><script>
-  alert('PPTXエクスポートに失敗しました: ${escHtml(result.error ?? '不明なエラー')}');
-  history.back();
-</script></body></html>`);
+        unlink(outPath).catch(() => {});
+        res.status(500).json({ error: result.error ?? '不明なエラー' });
         return;
       }
       res.download(outPath, `${deck.title}.pptx`, () => { unlink(outPath).catch(() => {}); });
@@ -752,8 +744,8 @@ export class PreviewServer {
       <div class="export-wrap">
         <button class="hdr-btn" onclick="toggleExportMenu()">\u2b07 \u30a8\u30af\u30b9\u30dd\u30fc\u30c8</button>
         <div class="export-menu" id="exportMenu">
-          <a href="/api/decks/${deck.id}/export/pdf" download>\ud83d\udcc4 PDF</a>
-          <a href="/api/decks/${deck.id}/export/pptx" download>\ud83d\udcca PPTX</a>
+          <a href="#" onclick="exportDeck('pdf');return false">\ud83d\udcc4 PDF</a>
+          <a href="#" onclick="exportDeck('pptx');return false">\ud83d\udcca PPTX</a>
         </div>
       </div>
       <a href="/editor/?deck=${deck.id}" class="hdr-btn primary">\u270f\ufe0f \u7de8\u96c6</a>
@@ -1024,6 +1016,38 @@ export class PreviewServer {
 
     function toggleExportMenu() { document.getElementById('exportMenu').classList.toggle('open'); }
     document.addEventListener('click', (e) => { if (!e.target.closest('.export-wrap')) document.getElementById('exportMenu').classList.remove('open'); });
+
+    async function exportDeck(format) {
+      const btn = event.target;
+      const origText = btn.textContent;
+      btn.textContent = '\u2026 \u30a8\u30af\u30b9\u30dd\u30fc\u30c8\u4e2d';
+      btn.style.pointerEvents = 'none';
+      try {
+        const resp = await fetch('/api/decks/' + deckId + '/export/' + format);
+        if (!resp.ok) {
+          const text = await resp.text();
+          const msg = text.includes('Playwright') ? 'Playwright\u304c\u30a4\u30f3\u30b9\u30c8\u30fc\u30eb\u3055\u308c\u3066\u3044\u307e\u305b\u3093\u3002\u30b5\u30fc\u30d0\u30fc\u3067 pnpm add playwright && npx playwright install chromium \u3092\u5b9f\u884c\u3057\u3066\u304f\u3060\u3055\u3044\u3002'
+            : '\u30a8\u30af\u30b9\u30dd\u30fc\u30c8\u306b\u5931\u6557\u3057\u307e\u3057\u305f: ' + resp.status;
+          alert(msg);
+          return;
+        }
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = deckTitle + '.' + format;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('\u30a8\u30af\u30b9\u30dd\u30fc\u30c8\u4e2d\u306b\u30a8\u30e9\u30fc\u304c\u767a\u751f\u3057\u307e\u3057\u305f: ' + err.message);
+      } finally {
+        btn.textContent = origText;
+        btn.style.pointerEvents = '';
+        document.getElementById('exportMenu').classList.remove('open');
+      }
+    }
 
     // ===== SLIDESHOW =====
     let ssIdx = 0;

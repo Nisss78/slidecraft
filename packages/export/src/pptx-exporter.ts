@@ -393,6 +393,7 @@ export async function exportToPptx(
   outputPath: string,
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
 ): Promise<ExportResult> {
+  let browser: import('playwright').Browser | undefined;
   try {
     const [pw, PptxGenJS] = await Promise.all([getPlaywright(), getPptxGenJs()]);
     const dims = getAspectRatioDimensions(aspectRatio);
@@ -402,7 +403,7 @@ export async function exportToPptx(
     const slideHeightInches = dims.height / 96; // 11.25 inches for 1080px
 
     // Launch browser with 2x scale for high-res background images
-    const browser = await pw.chromium.launch();
+    browser = await pw.chromium.launch();
     const context = await browser.newContext({
       deviceScaleFactor: 2,
     });
@@ -480,6 +481,7 @@ export async function exportToPptx(
 
     // Close browser
     await browser.close();
+    browser = undefined;
 
     // Save PPTX
     await mkdir(dirname(outputPath), { recursive: true });
@@ -493,5 +495,7 @@ export async function exportToPptx(
       format: 'pptx',
       error: err instanceof Error ? err.message : 'Unknown error',
     };
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
