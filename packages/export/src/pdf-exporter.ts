@@ -1,7 +1,8 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Deck } from '@slideharness/core';
-import { getAspectRatioDimensions } from '@slideharness/renderer';
+import { getAspectRatioDimensions, getCanvasDimensions } from '@slideharness/renderer';
+import type { CanvasSize } from '@slideharness/renderer';
 import { PDFDocument } from 'pdf-lib';
 import type { ExportResult } from './types.js';
 
@@ -75,11 +76,12 @@ export async function exportToPdf(
   slideHtmls: string[],
   outputPath: string,
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
+  canvasSize?: CanvasSize,
 ): Promise<ExportResult> {
   let browser: import('playwright').Browser | undefined;
   try {
     const pw = await getPlaywright();
-    const dims = getAspectRatioDimensions(aspectRatio);
+    const dims = canvasSize ? getCanvasDimensions(canvasSize) : getAspectRatioDimensions(aspectRatio);
 
     browser = await pw.chromium.launch();
     const context = await browser.newContext();
@@ -140,11 +142,12 @@ export async function exportToPng(
   slideHtmls: string[],
   outputDir: string,
   aspectRatio: '16:9' | '4:3' | '16:10' | '1:1' = '16:9',
+  canvasSize?: CanvasSize,
 ): Promise<ExportResult> {
   let browser: import('playwright').Browser | undefined;
   try {
     const pw = await getPlaywright();
-    const dims = getAspectRatioDimensions(aspectRatio);
+    const dims = canvasSize ? getCanvasDimensions(canvasSize) : getAspectRatioDimensions(aspectRatio);
 
     browser = await pw.chromium.launch();
     const context = await browser.newContext({

@@ -23,13 +23,62 @@ export interface SlideThemeOptions {
   };
 }
 
+/** Format-specific CSS variable overrides */
+const FORMAT_CSS_OVERRIDES: Record<string, { h1: string; h2?: string; h3?: string; spacing: string; bodySize?: string }> = {
+  'instagram-post': {
+    h1: 'clamp(3rem, 5.5vw, 5rem)',
+    h2: 'clamp(1.5rem, 3vw, 2.5rem)',
+    h3: 'clamp(1.25rem, 2.4vw, 2rem)',
+    spacing: 'clamp(32px, 4vw, 80px)',
+    bodySize: 'clamp(1.5rem, 2.4vw, 2rem)',
+  },
+  'instagram-story': {
+    h1: 'clamp(3rem, 5vw, 4.5rem)',
+    h2: 'clamp(1.5rem, 3vw, 2.5rem)',
+    h3: 'clamp(1.25rem, 2.4vw, 2.25rem)',
+    spacing: 'clamp(32px, 3vw, 64px)',
+    bodySize: 'clamp(1.5rem, 2.4vw, 2.25rem)',
+  },
+  'youtube-thumbnail': {
+    h1: 'clamp(6rem, 20vw, 14rem)',
+    h2: 'clamp(3rem, 10vw, 7rem)',
+    spacing: 'clamp(16px, 2vw, 32px)',
+  },
+  'x-post': {
+    h1: 'clamp(2rem, 4vw, 3.5rem)',
+    h2: 'clamp(1.25rem, 2.5vw, 2rem)',
+    spacing: 'clamp(24px, 3vw, 48px)',
+    bodySize: 'clamp(1rem, 2vw, 1.5rem)',
+  },
+  'pinterest-pin': {
+    h1: 'clamp(2rem, 4vw, 3.5rem)',
+    h2: 'clamp(1.25rem, 2.5vw, 2rem)',
+    spacing: 'clamp(24px, 3vw, 64px)',
+    bodySize: 'clamp(1rem, 2vw, 1.5rem)',
+  },
+  'linkedin-post': {
+    h1: 'clamp(2rem, 3.5vw, 3rem)',
+    h2: 'clamp(1.25rem, 2vw, 1.8rem)',
+    spacing: 'clamp(24px, 3vw, 48px)',
+    bodySize: 'clamp(1rem, 1.8vw, 1.4rem)',
+  },
+  'a4': {
+    h1: 'clamp(2rem, 3vw, 3rem)',
+    h2: 'clamp(1.25rem, 2vw, 1.8rem)',
+    spacing: 'clamp(24px, 2vw, 48px)',
+    bodySize: 'clamp(0.875rem, 1.2vw, 1.2rem)',
+  },
+};
+
 export function generateBlankSlideHtml(options?: {
   title?: string;
   width?: number;
   height?: number;
   theme?: SlideThemeOptions;
+  format?: string;
 }): string {
-  const { title = 'Untitled Slide', width = 1920, height = 1080, theme } = options ?? {};
+  const { title = 'Untitled Slide', width = 1920, height = 1080, theme, format } = options ?? {};
+  const formatOverrides = format ? FORMAT_CSS_OVERRIDES[format] : undefined;
 
   const colors = {
     primary: theme?.colors?.primary ?? '#007BFF',
@@ -89,18 +138,18 @@ export function generateBlankSlideHtml(options?: {
       --font-body: '${typo.bodyFont}', sans-serif;
       --font-size-base: ${typo.baseFontSize}px;
       --heading-weight: ${typo.headingWeight};
-      --font-size-h1: clamp(2rem, 3.5vw, 3.5rem);
-      --font-size-h2: clamp(1.25rem, 2vw, 2rem);
-      --font-size-h3: clamp(1rem, 1.4vw, 1.4rem);
-      --spacing-slide: clamp(24px, 3.3vw, 64px);
+      --font-size-h1: ${formatOverrides?.h1 ?? 'clamp(2rem, 3.5vw, 3.5rem)'};
+      --font-size-h2: ${formatOverrides?.h2 ?? 'clamp(1.25rem, 2vw, 2rem)'};
+      --font-size-h3: ${formatOverrides?.h3 ?? 'clamp(1rem, 1.4vw, 1.4rem)'};
+      --spacing-slide: ${formatOverrides?.spacing ?? 'clamp(24px, 3.3vw, 64px)'};${formatOverrides?.bodySize ? `\n      --font-size-body: ${formatOverrides.bodySize};` : ''}
     }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; border: 0 solid transparent; }
     body {
       width: ${width}px;
       height: ${height}px;
       overflow: hidden;
       font-family: var(--font-body);
-      font-size: var(--font-size-base);
+      font-size: var(--font-size-body, var(--font-size-base));
       color: var(--color-text);
       background: var(--color-bg);
       word-break: keep-all;
@@ -188,8 +237,8 @@ export function generateBlankSlideHtml(options?: {
     .sh-split-60-40 { display: grid; grid-template-columns: 3fr 2fr; height: 100%; }
   </style>
 </head>
-<body class="flex items-center justify-center">
-  <h1 style="font-size: 3rem; font-weight: var(--heading-weight); color: var(--color-text);">${escapeHtml(title)}</h1>
+<body class="flex ${height > width ? 'flex-col' : ''} items-center justify-center">
+  <h1 style="font-size: var(--font-size-h1, 3rem); font-weight: var(--heading-weight); color: var(--color-text);">${escapeHtml(title)}</h1>
 </body>
 </html>`;
 }

@@ -11,24 +11,25 @@ import { fileURLToPath } from 'node:url';
 import type { Deck, JsonFileStorage } from '@slideharness/core';
 import { createDeck, createSlide, addSlideToDeck, deleteSlideFromDeck, reorderSlides, updateDeckMeta } from '@slideharness/core';
 import { exportToPdf, exportToPptx } from '@slideharness/export';
-import { generateBlankSlideHtml } from '@slideharness/renderer';
+import { generateBlankSlideHtml, resolveCanvasSize, CANVAS_PRESETS } from '@slideharness/renderer';
 import { randomBytes } from 'node:crypto';
 import JSZip from 'jszip';
 import { basename } from 'node:path';
 
 const require = createRequire(import.meta.url);
 
-/** Inject word-break CSS into slide HTML if not already present */
+/** Inject word-break CSS and border reset into slide HTML */
 function injectWordBreakCss(html: string): string {
-  if (html.includes('word-break:keep-all') || html.includes('word-break: keep-all')) {
-    return html;
+  const fixes: string[] = [];
+  if (!html.includes('word-break:keep-all') && !html.includes('word-break: keep-all')) {
+    fixes.push('body{word-break:keep-all;overflow-wrap:break-word}');
   }
-  // Inject into existing body style or add a <style> tag before </head>
-  if (html.includes('<style>') && html.includes('body{')) {
-    return html.replace(/body\{([^}]*)}/,  'body{$1;word-break:keep-all;overflow-wrap:break-word}');
+  // Reset Tailwind Preflight borders that can cause stray lines
+  if (!html.includes('border: 0 solid') && !html.includes('border:0 solid')) {
+    fixes.push('*,*::before,*::after{border:0 solid transparent}');
   }
-  // Fallback: inject a style block before </head>
-  return html.replace('</head>', '<style>body{word-break:keep-all;overflow-wrap:break-word}</style></head>');
+  if (fixes.length === 0) return html;
+  return html.replace('</head>', `<style>${fixes.join('')}</style>\n</head>`);
 }
 
 function resolveEditorDist(): string | null {
@@ -182,8 +183,10 @@ export class PreviewServer {
     // API: Create deck
     this.app.post('/api/decks', async (req, res) => {
       try {
-        const { title } = req.body;
-        const deck = createDeck({ title: title || 'Untitled' });
+        const { title, canvasSize } = req.body;
+        const metadata: Record<string, unknown> = {};
+        if (canvasSize) metadata.canvasSize = canvasSize;
+        const deck = createDeck({ title: title || 'Untitled', metadata: Object.keys(metadata).length > 0 ? metadata : undefined });
         await this.storage.saveDeck(deck);
         this.notifyDeckUpdate(deck.id);
         res.json({ id: deck.id, title: deck.title });
@@ -196,7 +199,11 @@ export class PreviewServer {
     this.app.patch('/api/decks/:id', async (req, res) => {
       const deck = await this.storage.loadDeck(req.params.id);
       if (!deck) { res.status(404).json({ error: 'Deck not found' }); return; }
-      const updated = updateDeckMeta(deck, req.body);
+      let updated = updateDeckMeta(deck, req.body);
+      // Merge metadata fields (e.g. favorite, canvasSize)
+      if (req.body.metadata && typeof req.body.metadata === 'object') {
+        updated = { ...updated, metadata: { ...(updated.metadata || {}), ...req.body.metadata } };
+      }
       await this.storage.saveDeck(updated);
       this.notifyDeckUpdate(updated.id);
       res.json({ id: updated.id, title: updated.title });
@@ -491,6 +498,137 @@ export class PreviewServer {
       res.json({ success: true });
     });
 
+    // ===== GLOBAL ASSETS API =====
+
+    this.app.get('/api/assets', async (req, res) => {
+      const category = req.query.category as string | undefined;
+      const validCategories = ['logo', 'photo', 'icon'];
+      const cat = category && validCategories.includes(category) ? category as 'logo' | 'photo' | 'icon' : undefined;
+      const assets = await this.storage.listAssets(cat);
+      res.json(assets.map(a => ({ ...a, url: `/api/assets/${a.id}/file` })));
+    });
+
+    this.app.post('/api/assets', express.raw({ type: () => true, limit: '10mb' }), async (req, res) => {
+      const rawName = req.headers['x-filename'];
+      const originalName = rawName ? decodeURIComponent(String(rawName)) : 'upload.png';
+      const ext = originalName.split('.').pop()?.toLowerCase() || '';
+      const allowedExts = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'ico']);
+      if (!allowedExts.has(ext)) {
+        res.status(400).json({ error: 'Unsupported file type. Allowed: ' + [...allowedExts].join(', ') });
+        return;
+      }
+      const mimeMap: Record<string, string> = {
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+        gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon',
+      };
+      const mimeType = mimeMap[ext] || 'application/octet-stream';
+      const rawCategory = req.headers['x-category'] as string | undefined;
+      const validCategories = ['logo', 'photo', 'icon'];
+      const category = rawCategory && validCategories.includes(rawCategory) ? rawCategory as 'logo' | 'photo' | 'icon' : 'photo';
+      const asset = await this.storage.saveAsset(Buffer.from(req.body as Buffer), originalName, mimeType, category);
+      res.json({ ...asset, url: `/api/assets/${asset.id}/file` });
+    });
+
+    this.app.get('/api/assets/:id/file', async (req, res) => {
+      const filePath = this.storage.getAssetPath(req.params.id);
+      if (!filePath || !existsSync(filePath)) {
+        res.status(404).json({ error: 'Asset not found' });
+        return;
+      }
+      const ext = filePath.split('.').pop()?.toLowerCase() || '';
+      const contentTypes: Record<string, string> = {
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+        gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon',
+      };
+      res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.sendFile(filePath);
+    });
+
+    this.app.delete('/api/assets/:id', async (req, res) => {
+      const deleted = await this.storage.deleteAsset(req.params.id);
+      if (!deleted) { res.status(404).json({ error: 'Asset not found' }); return; }
+      res.json({ success: true });
+    });
+
+    // ===== COLORS API =====
+
+    this.app.get('/api/colors', async (_req, res) => {
+      const colors = await this.storage.listColors();
+      res.json(colors);
+    });
+
+    this.app.post('/api/colors', express.json(), async (req, res) => {
+      const { hex, name } = req.body as { hex?: string; name?: string };
+      if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) {
+        res.status(400).json({ error: 'Invalid hex color. Must be #RRGGBB format.' });
+        return;
+      }
+      const color = await this.storage.saveColor(hex, name);
+      res.json(color);
+    });
+
+    this.app.delete('/api/colors/:id', async (req, res) => {
+      const deleted = await this.storage.deleteColor(req.params.id);
+      if (!deleted) { res.status(404).json({ error: 'Color not found' }); return; }
+      res.json({ success: true });
+    });
+
+    // ===== FONTS API =====
+
+    this.app.get('/api/fonts', async (_req, res) => {
+      const fonts = await this.storage.listFonts();
+      res.json(fonts);
+    });
+
+    this.app.post('/api/fonts', express.raw({ type: () => true, limit: '20mb' }), async (req, res) => {
+      const rawName = req.headers['x-filename'];
+      const originalName = rawName ? decodeURIComponent(String(rawName)) : 'font.ttf';
+      const ext = originalName.split('.').pop()?.toLowerCase() || '';
+      const allowedExts = new Set(['ttf', 'otf', 'woff', 'woff2']);
+      if (!allowedExts.has(ext)) {
+        res.status(400).json({ error: 'Unsupported font type. Allowed: ' + [...allowedExts].join(', ') });
+        return;
+      }
+      const mimeMap: Record<string, string> = {
+        ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
+      };
+      const mimeType = mimeMap[ext] || 'application/octet-stream';
+      const font = await this.storage.saveFont(Buffer.from(req.body as Buffer), originalName, mimeType);
+      res.json(font);
+    });
+
+    this.app.post('/api/fonts/google', express.json(), async (req, res) => {
+      const { family } = req.body as { family?: string };
+      if (!family || typeof family !== 'string') {
+        res.status(400).json({ error: 'family is required' });
+        return;
+      }
+      const font = await this.storage.saveGoogleFont(family);
+      res.json(font);
+    });
+
+    this.app.get('/api/fonts/:id/file', async (req, res) => {
+      const filePath = this.storage.getFontPath(req.params.id);
+      if (!filePath || !existsSync(filePath)) {
+        res.status(404).json({ error: 'Font not found' });
+        return;
+      }
+      const ext = filePath.split('.').pop()?.toLowerCase() || '';
+      const contentTypes: Record<string, string> = {
+        ttf: 'font/ttf', otf: 'font/otf', woff: 'font/woff', woff2: 'font/woff2',
+      };
+      res.setHeader('Content-Type', contentTypes[ext] || 'application/octet-stream');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.sendFile(filePath);
+    });
+
+    this.app.delete('/api/fonts/:id', async (req, res) => {
+      const deleted = await this.storage.deleteFont(req.params.id);
+      if (!deleted) { res.status(404).json({ error: 'Font not found' }); return; }
+      res.json({ success: true });
+    });
+
     // API: Export deck as PDF
     this.app.get('/api/decks/:id/export/pdf', async (req, res) => {
       const deck = await this.storage.loadDeck(req.params.id);
@@ -502,7 +640,8 @@ export class PreviewServer {
       }
       if (slideHtmls.length === 0) { res.status(400).json({ error: 'No slides to export' }); return; }
       const outPath = join(tmpdir(), `slideharness-${deck.id}-${Date.now()}.pdf`);
-      const result = await exportToPdf(deck, slideHtmls, outPath);
+      const deckCanvasSize = resolveCanvasSize(deck.metadata as Record<string, unknown> | undefined);
+      const result = await exportToPdf(deck, slideHtmls, outPath, '16:9', deckCanvasSize);
       if (!result.success) {
         unlink(outPath).catch(() => {});
         res.status(500).json({ error: result.error ?? '不明なエラー' });
@@ -522,7 +661,8 @@ export class PreviewServer {
       }
       if (slideHtmls.length === 0) { res.status(400).json({ error: 'No slides to export' }); return; }
       const outPath = join(tmpdir(), `slideharness-${deck.id}-${Date.now()}.pptx`);
-      const result = await exportToPptx(deck, slideHtmls, outPath);
+      const pptxCanvasSize = resolveCanvasSize(deck.metadata as Record<string, unknown> | undefined);
+      const result = await exportToPptx(deck, slideHtmls, outPath, '16:9', pptxCanvasSize);
       if (!result.success) {
         unlink(outPath).catch(() => {});
         res.status(500).json({ error: result.error ?? '不明なエラー' });
@@ -535,6 +675,11 @@ export class PreviewServer {
     this.app.get('/style-picker/:deckId', async (req, res) => {
       const deck = await this.storage.loadDeck(req.params.deckId);
       if (!deck) { res.status(404).send('Deck not found'); return; }
+
+      const spDims = resolveCanvasSize(deck.metadata as Record<string, unknown> | undefined);
+      const spW = spDims.width;
+      const spH = spDims.height;
+      const spPaddingTop = ((spH / spW) * 100).toFixed(2);
 
       const labels = ['A', 'B', 'C'];
       const slides = deck.slides.slice(0, 3);
@@ -563,8 +708,8 @@ export class PreviewServer {
     .option { background: #1e293b; border-radius: 12px; overflow: hidden; border: 2px solid #334155; transition: all 0.2s; cursor: pointer; }
     .option:hover { border-color: #818cf8; transform: translateY(-4px); box-shadow: 0 8px 32px rgba(99,102,241,0.2); }
     .label { background: #334155; padding: 8px 16px; font-weight: 700; font-size: 18px; text-align: center; }
-    .frame-wrap { position: relative; width: 100%; padding-top: 56.25%; overflow: hidden; }
-    .frame-wrap iframe { position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; transform: scale(0.23); transform-origin: top left; border: none; pointer-events: none; }
+    .frame-wrap { position: relative; width: 100%; padding-top: ${spPaddingTop}%; overflow: hidden; }
+    .frame-wrap iframe { position: absolute; top: 0; left: 0; width: ${spW}px; height: ${spH}px; transform: scale(0.23); transform-origin: top left; border: none; pointer-events: none; }
     .name { padding: 12px 16px; font-size: 13px; color: #94a3b8; text-align: center; }
     .hint { margin-top: 32px; color: #64748b; font-size: 13px; text-align: center; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr; max-width: 500px; } }
@@ -590,6 +735,10 @@ export class PreviewServer {
         return;
       }
 
+      const canvasDims = resolveCanvasSize(deck.metadata as Record<string, unknown> | undefined);
+      const cW = canvasDims.width;
+      const cH = canvasDims.height;
+
       const slidesMetaJson = JSON.stringify(
         deck.slides.map((s, i) => ({ index: i, id: s.id, title: s.title || `Slide ${i + 1}` })),
       );
@@ -600,6 +749,7 @@ export class PreviewServer {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escHtml(deck.title)} - Slide Harness</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <style>
     :root {
       --bg: #ffffff; --text: #202124; --header-bg: #ffffff; --header-border: #e5e7eb;
@@ -652,20 +802,53 @@ export class PreviewServer {
 
     .main { flex: 1; display: flex; overflow: hidden; }
 
-    .sidebar { width: 220px; flex-shrink: 0; overflow-y: auto; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-    .thumb-item { cursor: pointer; border-radius: 8px; overflow: hidden; border: 2px solid transparent; transition: all 0.15s; position: relative; }
-    .thumb-item:hover { border-color: rgba(99,102,241,0.3); transform: scale(1.02); }
-    .thumb-item.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,0.2); }
-    .thumb-item.dragging { opacity: 0.4; }
-    .thumb-item.drag-over { border-top: 3px solid var(--accent); }
-    .thumb-label { position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, rgba(0,0,0,0.8)); padding: 16px 8px 6px; font-size: 11px; color: #fff; }
-    .thumb-iframe-wrap { width: 100%; aspect-ratio: 16/9; overflow: hidden; position: relative; background: var(--thumb-bg); }
-    .thumb-iframe-wrap iframe { width: 1920px; height: 1080px; border: none; pointer-events: none; transform-origin: top left; position: absolute; top: 0; left: 0; }
+    /* Left icon rail */
+    .editor-rail { width: 60px; flex-shrink: 0; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); display: flex; flex-direction: column; align-items: center; padding: 8px 0; gap: 2px; z-index: 50; }
+    .rail-tab { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 10px 4px; border: none; background: none; cursor: pointer; color: var(--meta-text); font-size: 10px; width: 56px; border-radius: 8px; transition: all 0.15s; }
+    .rail-tab:hover { background: rgba(99,102,241,0.08); color: var(--text); }
+    .rail-tab.active { background: rgba(99,102,241,0.12); color: var(--accent); }
+    .rail-tab i { font-size: 20px; }
 
-    .slide-area { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; overflow: hidden; position: relative; }
-    .slide-frame { width: 100%; max-width: 960px; aspect-ratio: 16/9; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 32px var(--slide-shadow); background: #fff; position: relative; }
-    .slide-frame iframe { width: 1920px; height: 1080px; border: none; transform-origin: top left; position: absolute; top: 0; left: 0; }
-    .slide-counter { margin-top: 16px; font-size: 14px; color: var(--meta-text); font-weight: 500; }
+    /* Expandable side panel */
+    .editor-panel { width: 0; overflow: hidden; flex-shrink: 0; background: var(--sidebar-bg); border-right: 1px solid var(--sidebar-border); transition: width 0.25s ease; display: flex; flex-direction: column; }
+    .editor-panel.open { width: 280px; }
+    .ep-header { padding: 14px 16px; border-bottom: 1px solid var(--sidebar-border); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .ep-header h3 { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; }
+    .ep-close { border: none; background: none; cursor: pointer; color: var(--meta-text); font-size: 16px; padding: 4px; border-radius: 4px; transition: all 0.15s; }
+    .ep-close:hover { background: rgba(99,102,241,0.1); color: var(--text); }
+    .ep-body { flex: 1; overflow-y: auto; padding: 12px; display: none; }
+    .ep-body.active { display: block; }
+    .ep-empty { text-align: center; padding: 32px 16px; color: var(--meta-text); font-size: 13px; }
+    .ep-empty i { font-size: 32px; display: block; margin-bottom: 12px; opacity: 0.4; }
+    .ep-project-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; cursor: pointer; transition: all 0.15s; text-decoration: none; color: var(--text); }
+    .ep-project-item:hover { background: rgba(99,102,241,0.08); }
+    .ep-project-item .proj-icon { width: 40px; height: 40px; border-radius: 6px; background: var(--thumb-bg); display: flex; align-items: center; justify-content: center; font-size: 16px; color: var(--meta-text); flex-shrink: 0; overflow: hidden; }
+    .ep-project-item .proj-icon img { width: 100%; height: 100%; object-fit: cover; }
+    .ep-project-item .proj-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ep-project-item .proj-meta { font-size: 11px; color: var(--meta-text); }
+
+    /* Canvas area + filmstrip */
+    .canvas-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .slide-area { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; overflow: hidden; position: relative; }
+    .slide-frame { width: 100%; max-width: 960px; aspect-ratio: ${cW}/${cH}; border-radius: 8px; overflow: hidden; box-shadow: 0 8px 32px var(--slide-shadow); background: #fff; position: relative; }
+    .slide-frame iframe { width: ${cW}px; height: ${cH}px; border: none; transform-origin: top left; position: absolute; top: 0; left: 0; }
+
+    /* Bottom filmstrip */
+    .filmstrip-bar { flex-shrink: 0; border-top: 1px solid var(--sidebar-border); background: var(--sidebar-bg); display: flex; align-items: center; padding: 8px 12px; gap: 8px; }
+    .filmstrip { display: flex; gap: 8px; overflow-x: auto; flex: 1; padding: 4px 0; -webkit-overflow-scrolling: touch; }
+    .filmstrip::-webkit-scrollbar { height: 4px; }
+    .filmstrip::-webkit-scrollbar-thumb { background: var(--sidebar-border); border-radius: 2px; }
+    .film-item { flex-shrink: 0; cursor: pointer; border-radius: 6px; overflow: hidden; border: 2px solid transparent; transition: all 0.15s; position: relative; width: 120px; }
+    .film-item:hover { border-color: rgba(99,102,241,0.3); }
+    .film-item.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,0.2); }
+    .film-item.dragging { opacity: 0.4; }
+    .film-item.drag-over { border-left: 3px solid var(--accent); }
+    .film-num { position: absolute; bottom: 2px; left: 4px; font-size: 9px; color: #fff; background: rgba(0,0,0,0.6); padding: 1px 5px; border-radius: 3px; z-index: 2; }
+    .film-iframe-wrap { width: 100%; aspect-ratio: ${cW}/${cH}; overflow: hidden; position: relative; background: var(--thumb-bg); }
+    .film-iframe-wrap iframe { width: ${cW}px; height: ${cH}px; border: none; pointer-events: none; transform-origin: top left; position: absolute; top: 0; left: 0; }
+    .filmstrip-add { flex-shrink: 0; width: 44px; height: 44px; border: 1px dashed var(--btn-border); border-radius: 8px; background: none; cursor: pointer; color: var(--meta-text); font-size: 18px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+    .filmstrip-add:hover { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,0.06); }
+    .filmstrip-counter { font-size: 12px; color: var(--meta-text); white-space: nowrap; flex-shrink: 0; }
 
     .code-panel { width: 0; overflow: hidden; transition: width 0.3s ease; background: var(--panel-bg); border-left: 1px solid var(--panel-border); display: flex; flex-direction: column; }
     .code-panel.open { width: 520px; }
@@ -712,7 +895,7 @@ export class PreviewServer {
     /* Slideshow overlay - fullscreen like PowerPoint */
     .slideshow { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 9999; overflow: hidden; cursor: none; }
     .slideshow.active { display: block; }
-    .slideshow iframe { border: none; position: absolute; width: 1920px; height: 1080px; transform-origin: top left; }
+    .slideshow iframe { border: none; position: absolute; width: ${cW}px; height: ${cH}px; transform-origin: top left; }
     .slideshow-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 40px; background: linear-gradient(transparent, rgba(0,0,0,0.8)); display: flex; align-items: center; justify-content: center; gap: 12px; z-index: 10000; opacity: 0; transition: opacity 0.3s; cursor: default; }
     .slideshow.show-ui .slideshow-bar { opacity: 1; }
     .slideshow.show-ui { cursor: default; }
@@ -728,7 +911,7 @@ export class PreviewServer {
 <body>
   <div class="header">
     <div class="header-left">
-      <a href="/" class="back-link" title="\u30db\u30fc\u30e0">\u2190</a>
+      <a href="/" class="back-link" title="\u30db\u30fc\u30e0"><i class="fa-solid fa-house" style="font-size:16px"></i></a>
       <div>
         <h1 id="deckTitle" onclick="startEditDeckTitle()">${escHtml(deck.title)}</h1>
         <div class="meta">
@@ -742,24 +925,52 @@ export class PreviewServer {
       <button class="hdr-btn" onclick="toggleCodePanel()" id="codeToggle">HTML</button>
       <button class="hdr-btn" onclick="toggleImagesPanel()" id="imagesToggle">\u753b\u50cf</button>
       <div class="export-wrap">
-        <button class="hdr-btn" onclick="toggleExportMenu()">\u2b07 \u30a8\u30af\u30b9\u30dd\u30fc\u30c8</button>
+        <button class="hdr-btn" onclick="toggleExportMenu()"><i class="fa-solid fa-download" style="font-size:12px"></i> \u30a8\u30af\u30b9\u30dd\u30fc\u30c8</button>
         <div class="export-menu" id="exportMenu">
-          <a href="#" onclick="exportDeck('pdf');return false">\ud83d\udcc4 PDF</a>
-          <a href="#" onclick="exportDeck('pptx');return false">\ud83d\udcca PPTX</a>
+          <a href="#" onclick="exportDeck('pdf');return false"><i class="fa-solid fa-file-pdf" style="margin-right:6px"></i>PDF</a>
+          <a href="#" onclick="exportDeck('pptx');return false"><i class="fa-solid fa-file-powerpoint" style="margin-right:6px"></i>PPTX</a>
         </div>
       </div>
-      <a href="/editor/?deck=${deck.id}" class="hdr-btn primary">\u270f\ufe0f \u7de8\u96c6</a>
-      <button class="hdr-btn play" onclick="startSlideshow()">\u25b6 \u30b9\u30e9\u30a4\u30c9\u30b7\u30e7\u30fc</button>
+      <a href="/editor/?deck=${deck.id}" class="hdr-btn primary"><i class="fa-solid fa-pen" style="font-size:12px"></i> \u7de8\u96c6</a>
+      <button class="hdr-btn play" onclick="startSlideshow()"><i class="fa-solid fa-play" style="font-size:12px"></i> \u30b9\u30e9\u30a4\u30c9\u30b7\u30e7\u30fc</button>
     </div>
   </div>
 
   <div class="main">
-    <div class="sidebar" id="sidebar"></div>
-    <div class="slide-area">
-      <div class="slide-frame">
-        <iframe id="mainSlide" src="about:blank"></iframe>
+    <!-- Left icon rail -->
+    <div class="editor-rail">
+      <button class="rail-tab" data-panel="templates" onclick="toggleEditorPanel('templates')"><i class="fa-solid fa-shapes"></i><span>\u30c6\u30f3\u30d7\u30ec</span></button>
+      <button class="rail-tab" data-panel="assets" onclick="toggleEditorPanel('assets')"><i class="fa-solid fa-cloud-arrow-up"></i><span>MY\u7d20\u6750</span></button>
+      <button class="rail-tab" data-panel="projects" onclick="toggleEditorPanel('projects')"><i class="fa-solid fa-folder-open"></i><span>\u30d7\u30ed\u30b8\u30a7\u30af\u30c8</span></button>
+    </div>
+    <!-- Expandable panel -->
+    <div class="editor-panel" id="editorPanel">
+      <div class="ep-header">
+        <h3 id="epTitle"></h3>
+        <button class="ep-close" onclick="closeEditorPanel()"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div class="slide-counter" id="slideCounter"></div>
+      <div class="ep-body" id="epTemplates">
+        <div class="ep-empty"><i class="fa-solid fa-shapes"></i>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u3092\u9078\u3093\u3067\u30c7\u30b6\u30a4\u30f3\u3092\u59cb\u3081\u307e\u3057\u3087\u3046</div>
+      </div>
+      <div class="ep-body" id="epAssets">
+        <div class="ep-empty"><i class="fa-solid fa-cloud-arrow-up"></i>\u30ed\u30b4\u3084\u5199\u771f\u306a\u3069\u306e\u7d20\u6750\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9</div>
+      </div>
+      <div class="ep-body" id="epProjects">
+        <div id="epProjectsList"></div>
+      </div>
+    </div>
+    <!-- Canvas + filmstrip -->
+    <div class="canvas-wrap">
+      <div class="slide-area">
+        <div class="slide-frame">
+          <iframe id="mainSlide" src="about:blank"></iframe>
+        </div>
+      </div>
+      <div class="filmstrip-bar">
+        <span class="filmstrip-counter" id="slideCounter"></span>
+        <div class="filmstrip" id="filmstrip"></div>
+        <button class="filmstrip-add" onclick="addNewPage()" title="\u30da\u30fc\u30b8\u3092\u8ffd\u52a0"><i class="fa-solid fa-plus"></i></button>
+      </div>
     </div>
     <div class="code-panel" id="codePanel">
       <div class="code-header">
@@ -807,6 +1018,8 @@ export class PreviewServer {
     const deckId = '${deck.id}';
     let deckTitle = '${escHtml(deck.title).replace(/'/g, "\\\\'")}';
     const slidesMeta = ${slidesMetaJson};
+    const CANVAS_W = ${cW};
+    const CANVAS_H = ${cH};
     let selectedIdx = 0;
     let dragSrcIdx = null;
 
@@ -814,23 +1027,80 @@ export class PreviewServer {
       document.getElementById('slideCounter').textContent = (selectedIdx + 1) + ' / ' + slidesMeta.length;
     }
 
-    function buildSidebar() {
-      const sidebar = document.getElementById('sidebar');
-      sidebar.innerHTML = slidesMeta.map((s, i) => {
+    // ===== EDITOR SIDE PANEL =====
+    let activePanel = null;
+    function toggleEditorPanel(panel) {
+      const panelEl = document.getElementById('editorPanel');
+      const tabs = document.querySelectorAll('.rail-tab');
+      if (activePanel === panel) { closeEditorPanel(); return; }
+      activePanel = panel;
+      panelEl.classList.add('open');
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.panel === panel));
+      document.querySelectorAll('.ep-body').forEach(b => b.classList.remove('active'));
+      var titles = { templates: '\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8', assets: 'MY\u7d20\u6750', projects: '\u30d7\u30ed\u30b8\u30a7\u30af\u30c8' };
+      document.getElementById('epTitle').textContent = titles[panel] || panel;
+      var bodyId = { templates: 'epTemplates', assets: 'epAssets', projects: 'epProjects' };
+      var body = document.getElementById(bodyId[panel]);
+      if (body) body.classList.add('active');
+      if (panel === 'projects') loadProjectsList();
+      if (panel === 'assets') loadPanelAssets();
+      setTimeout(scaleMainSlide, 300);
+    }
+    function closeEditorPanel() {
+      activePanel = null;
+      document.getElementById('editorPanel').classList.remove('open');
+      document.querySelectorAll('.rail-tab').forEach(t => t.classList.remove('active'));
+      setTimeout(scaleMainSlide, 300);
+    }
+    function loadProjectsList() {
+      fetch('/api/decks').then(r => r.json()).then(function(decks) {
+        var list = document.getElementById('epProjectsList');
+        if (!decks || decks.length === 0) { list.innerHTML = '<div class="ep-empty"><i class="fa-solid fa-folder-open"></i>\u30d7\u30ed\u30b8\u30a7\u30af\u30c8\u304c\u3042\u308a\u307e\u305b\u3093</div>'; return; }
+        list.innerHTML = decks.map(function(d) {
+          var isCurrent = d.id === deckId;
+          var cnt = Array.isArray(d.slides) ? d.slides.length : 0;
+          return '<a href="/preview/' + d.id + '" class="ep-project-item" style="' + (isCurrent ? 'background:rgba(99,102,241,0.1)' : '') + '">' +
+            '<div class="proj-icon"><i class="fa-solid fa-file-lines"></i></div>' +
+            '<div><div class="proj-name">' + (d.title || 'Untitled') + (isCurrent ? ' \u2190' : '') + '</div>' +
+            '<div class="proj-meta">' + cnt + ' pages</div></div></a>';
+        }).join('');
+      });
+    }
+    function loadPanelAssets() {
+      fetch('/api/assets').then(r => r.json()).then(function(assets) {
+        var body = document.getElementById('epAssets');
+        if (!assets || assets.length === 0) { body.innerHTML = '<div class="ep-empty"><i class="fa-solid fa-cloud-arrow-up"></i>\u7d20\u6750\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093<br><a href="/#assets" style="color:var(--accent);font-size:12px">\u30db\u30fc\u30e0\u3067\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9</a></div>'; return; }
+        body.innerHTML = '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">' + assets.map(function(a) {
+          var url = '/api/assets/' + a.id + '/file';
+          return '<div style="border:1px solid var(--btn-border);border-radius:8px;overflow:hidden;cursor:pointer" onclick="copyAssetUrlPanel(\\'' + a.id + '\\')" title="\u30af\u30ea\u30c3\u30af\u3067URL\u30b3\u30d4\u30fc">' +
+            '<img src="' + url + '" style="width:100%;aspect-ratio:1;object-fit:cover;display:block">' +
+            '<div style="padding:4px 6px;font-size:10px;color:var(--meta-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (a.originalName || a.id) + '</div></div>';
+        }).join('') + '</div>';
+      });
+    }
+    function copyAssetUrlPanel(id) {
+      var url = location.origin + '/api/assets/' + id + '/file';
+      navigator.clipboard.writeText(url).then(function() { showToast('URL\u3092\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f'); });
+    }
+
+    // ===== FILMSTRIP (bottom page thumbnails) =====
+    function buildFilmstrip() {
+      const strip = document.getElementById('filmstrip');
+      strip.innerHTML = slidesMeta.map((s, i) => {
         const url = '/api/decks/' + deckId + '/slides/' + s.id + '/html';
-        return '<div class="thumb-item' + (i === selectedIdx ? ' selected' : '') + '" data-idx="' + i + '" draggable="true" onclick="selectSlide(' + i + ')">' +
-          '<div class="thumb-iframe-wrap"><iframe src="' + url + '" loading="lazy" scrolling="no"></iframe></div>' +
-          '<div class="thumb-label">' + (i + 1) + '. ' + (s.title || 'Slide') + '</div>' +
+        return '<div class="film-item' + (i === selectedIdx ? ' selected' : '') + '" data-idx="' + i + '" draggable="true" onclick="selectSlide(' + i + ')">' +
+          '<div class="film-iframe-wrap"><iframe src="' + url + '" loading="lazy" scrolling="no"></iframe></div>' +
+          '<span class="film-num">' + (i + 1) + '</span>' +
         '</div>';
       }).join('');
-      sidebar.querySelectorAll('.thumb-item').forEach(el => {
+      strip.querySelectorAll('.film-item').forEach(el => {
         el.addEventListener('dragstart', onDragStart);
         el.addEventListener('dragover', onDragOver);
         el.addEventListener('dragleave', onDragLeave);
         el.addEventListener('drop', onDrop);
         el.addEventListener('dragend', onDragEnd);
       });
-      scaleThumbIframes();
+      scaleFilmIframes();
     }
 
     function onDragStart(e) { dragSrcIdx = parseInt(e.currentTarget.dataset.idx); e.currentTarget.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; }
@@ -844,21 +1114,29 @@ export class PreviewServer {
       const moved = slidesMeta.splice(dragSrcIdx, 1)[0];
       slidesMeta.splice(targetIdx, 0, moved);
       slidesMeta.forEach((s, i) => s.index = i);
-      selectedIdx = targetIdx; buildSidebar(); selectSlide(selectedIdx);
+      selectedIdx = targetIdx; buildFilmstrip(); selectSlide(selectedIdx);
       fetch('/api/decks/' + deckId + '/reorder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slideIds: slidesMeta.map(s => s.id) }) });
       dragSrcIdx = null;
+    }
+
+    function addNewPage() {
+      fetch('/api/decks/' + deckId + '/slides', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+        .then(r => r.json()).then(function(data) {
+          slidesMeta.push({ index: slidesMeta.length, id: data.slideId, title: 'Page ' + (slidesMeta.length + 1) });
+          buildFilmstrip();
+          selectSlide(slidesMeta.length - 1);
+        });
     }
 
     function selectSlide(idx) {
       selectedIdx = idx;
       const slide = slidesMeta[idx];
       document.getElementById('mainSlide').src = '/api/decks/' + deckId + '/slides/' + slide.id + '/html';
-      document.querySelectorAll('.thumb-item').forEach((el, i) => el.classList.toggle('selected', i === idx));
+      document.querySelectorAll('.film-item').forEach((el, i) => el.classList.toggle('selected', i === idx));
       updateSlideCounter();
       if (codeOpen) loadCode();
-      // Scroll selected into view
-      const selected = document.querySelector('.thumb-item.selected');
-      if (selected) selected.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      const selected = document.querySelector('.film-item.selected');
+      if (selected) selected.scrollIntoView({ inline: 'nearest', behavior: 'smooth' });
     }
 
     function startEditDeckTitle() {
@@ -1102,10 +1380,10 @@ export class PreviewServer {
       var el = document.getElementById('slideshow');
       var w = el.clientWidth || window.innerWidth;
       var h = el.clientHeight || window.innerHeight;
-      var scale = Math.min(w / 1920, h / 1080);
+      var scale = Math.min(w / CANVAS_W, h / CANVAS_H);
       iframe.style.transform = 'scale(' + scale + ')';
-      iframe.style.left = ((w - 1920 * scale) / 2) + 'px';
-      iframe.style.top = ((h - 1080 * scale) / 2) + 'px';
+      iframe.style.left = ((w - CANVAS_W * scale) / 2) + 'px';
+      iframe.style.top = ((h - CANVAS_H * scale) / 2) + 'px';
     }
 
     function ssNav(dir) {
@@ -1137,7 +1415,7 @@ export class PreviewServer {
       ssMouseTimer = setTimeout(function() { el.classList.remove('show-ui'); }, 2500);
     });
 
-    window.addEventListener('resize', () => { if (ssActive) ssLayout(); scaleMainSlide(); scaleThumbIframes(); });
+    window.addEventListener('resize', () => { if (ssActive) ssLayout(); scaleMainSlide(); scaleFilmIframes(); });
 
     // ===== KEYBOARD NAV (preview) =====
     document.addEventListener('keydown', (e) => {
@@ -1152,21 +1430,21 @@ export class PreviewServer {
     function connectWs() {
       ws = new WebSocket('ws://' + location.host);
       ws.onopen = () => { document.getElementById('statusDot').className = 'status-dot'; document.getElementById('statusText').textContent = 'Live'; ws.send(JSON.stringify({ type: 'subscribe', deckId })); };
-      ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'deck-updated' && m.deckId === deckId) { document.getElementById('mainSlide').src = document.getElementById('mainSlide').src; buildSidebar(); setTimeout(() => selectSlide(selectedIdx), 100); if (codeOpen) loadCode(); if (imagesOpen) refreshImages(); } };
+      ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.type === 'deck-updated' && m.deckId === deckId) { document.getElementById('mainSlide').src = document.getElementById('mainSlide').src; buildFilmstrip(); setTimeout(() => selectSlide(selectedIdx), 100); if (codeOpen) loadCode(); if (imagesOpen) refreshImages(); } };
       ws.onclose = () => { document.getElementById('statusDot').className = 'status-dot disconnected'; document.getElementById('statusText').textContent = 'Offline'; setTimeout(connectWs, 2000); };
     }
 
-    function scaleMainSlide() { const f = document.querySelector('.slide-frame'); const i = document.getElementById('mainSlide'); if (f && i) i.style.transform = 'scale(' + (f.clientWidth / 1920) + ')'; }
-    function scaleThumbIframes() { document.querySelectorAll('.thumb-iframe-wrap').forEach(w => { const i = w.querySelector('iframe'); if (i) i.style.transform = 'scale(' + (w.clientWidth / 1920) + ')'; }); }
+    function scaleMainSlide() { const f = document.querySelector('.slide-frame'); const i = document.getElementById('mainSlide'); if (f && i) i.style.transform = 'scale(' + (f.clientWidth / CANVAS_W) + ')'; }
+    function scaleFilmIframes() { document.querySelectorAll('.film-iframe-wrap').forEach(w => { const i = w.querySelector('iframe'); if (i) i.style.transform = 'scale(' + (w.clientWidth / CANVAS_W) + ')'; }); }
 
     // Theme
     function toggleTheme() { /* removed - always dark for now */ }
     (function initTheme() { const s = localStorage.getItem('slideharness-theme'); if (s) document.documentElement.dataset.theme = s; })();
 
-    buildSidebar();
+    buildFilmstrip();
     if (slidesMeta.length > 0) selectSlide(0);
     connectWs();
-    requestAnimationFrame(() => { scaleMainSlide(); scaleThumbIframes(); });
+    requestAnimationFrame(() => { scaleMainSlide(); scaleFilmIframes(); });
   </script>
 </body>
 </html>`);
@@ -1331,7 +1609,27 @@ export class PreviewServer {
         return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`;
       };
 
-      const decksJson = JSON.stringify(decks.map(d => ({ id: d.id, title: d.title, slides: d.slides.length, updatedAt: d.updatedAt })));
+      const decksJson = JSON.stringify(decks.map(d => {
+        const cs = resolveCanvasSize(d.metadata as Record<string, unknown> | undefined);
+        const meta = (d.metadata || {}) as Record<string, unknown>;
+        return { id: d.id, title: d.title, slides: d.slides.length, updatedAt: d.updatedAt, cw: cs.width, ch: cs.height, favorite: !!meta.favorite };
+      }));
+
+      // Build template data from existing decks (first slide HTML as thumbnail)
+      const templateData: Array<{ id: string; title: string; desc: string; slideCount: number; firstHtml: string }> = [];
+      for (const deck of decks) {
+        if (deck.slides.length === 0) continue;
+        const firstHtml = await this.storage.loadSlideHtml(deck.id, deck.slides[0].id);
+        if (!firstHtml) continue;
+        templateData.push({
+          id: deck.id,
+          title: deck.title,
+          desc: deck.description || '',
+          slideCount: deck.slides.length,
+          firstHtml,
+        });
+      }
+      const templatesJson = JSON.stringify(templateData);
 
       res.type('html').send(`<!DOCTYPE html>
 <html lang="ja" data-theme="light">
@@ -1339,6 +1637,7 @@ export class PreviewServer {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Slide Harness</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
   <style>
     :root {
       --h-bg: #fff; --h-text: #202124; --h-border: #e0e0e0; --h-sub: #5f6368;
@@ -1346,6 +1645,7 @@ export class PreviewServer {
       --h-thumb-bg: #f1f3f4; --h-badge-bg: #6366f1; --h-date: #9aa0a6;
       --h-modal-bg: #fff; --h-modal-shadow: rgba(0,0,0,0.2); --h-input-border: #ddd;
       --h-overlay-bg: rgba(0,0,0,0.4); --h-edit-border: #818cf8;
+      --h-sidebar-bg: #f8f9fa; --h-sidebar-hover: rgba(99,102,241,0.08); --h-sidebar-active: rgba(99,102,241,0.12);
     }
     [data-theme="dark"] {
       --h-bg: #0f0f23; --h-text: #e0e0e0; --h-border: rgba(255,255,255,0.1); --h-sub: #94a3b8;
@@ -1353,26 +1653,54 @@ export class PreviewServer {
       --h-thumb-bg: #1e1e2e; --h-badge-bg: #818cf8; --h-date: #64748b;
       --h-modal-bg: #1a1b2e; --h-modal-shadow: rgba(0,0,0,0.5); --h-input-border: rgba(255,255,255,0.15);
       --h-overlay-bg: rgba(0,0,0,0.6); --h-edit-border: #818cf8;
+      --h-sidebar-bg: #12122a; --h-sidebar-hover: rgba(129,140,248,0.1); --h-sidebar-active: rgba(129,140,248,0.15);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: var(--h-bg); color: var(--h-text); font-family: 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif; }
-    .top-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 24px; border-bottom: 1px solid var(--h-border); position: sticky; top: 0; background: var(--h-bg); z-index: 100; }
-    .logo { display: flex; align-items: center; gap: 12px; }
-    .logo-icon { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #818cf8); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; font-size: 18px; }
-    .logo-text { font-size: 22px; font-weight: 400; color: var(--h-sub); }
-    .logo-text span { color: var(--h-text); font-weight: 500; }
-    .search-bar { flex: 1; max-width: 720px; margin: 0 40px; position: relative; }
-    .search-bar input { width: 100%; padding: 12px 16px 12px 48px; border-radius: 8px; border: none; background: var(--h-input-bg); font-size: 16px; color: var(--h-text); outline: none; transition: box-shadow 0.2s; }
+    body { background: var(--h-bg); color: var(--h-text); font-family: 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif; display: flex; height: 100vh; overflow: hidden; }
+    /* Sidebar */
+    .sidebar { width: 72px; height: 100vh; position: fixed; left: 0; top: 0; background: var(--h-sidebar-bg); border-right: 1px solid var(--h-border); display: flex; flex-direction: column; align-items: center; padding: 12px 0; z-index: 200; }
+    .sidebar-logo { width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #818cf8); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 800; font-size: 16px; margin-bottom: 20px; flex-shrink: 0; cursor: default; }
+    .sidebar-nav { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; }
+    .nav-item { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 0; width: 64px; border: none; background: transparent; cursor: pointer; border-radius: 12px; color: var(--h-sub); transition: all 0.15s; }
+    .nav-item i { font-size: 20px; width: 40px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 10px; transition: all 0.15s; }
+    .nav-item span { font-size: 10px; font-weight: 500; }
+    .nav-item:hover { color: var(--h-text); }
+    .nav-item:hover i { background: var(--h-sidebar-hover); }
+    .nav-item.active { color: #6366f1; }
+    .nav-item.active i { background: var(--h-sidebar-active); color: #6366f1; }
+    .sidebar-bottom { display: flex; flex-direction: column; align-items: center; gap: 8px; flex-shrink: 0; padding-top: 8px; border-top: 1px solid var(--h-border); width: 56px; }
+    .sidebar-btn { width: 40px; height: 40px; border-radius: 10px; border: none; background: transparent; cursor: pointer; color: var(--h-sub); font-size: 16px; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+    .sidebar-btn:hover { background: var(--h-sidebar-hover); color: var(--h-text); }
+
+    /* Main Content */
+    .main-content { flex: 1; margin-left: 72px; height: 100vh; overflow-y: auto; display: flex; flex-direction: column; }
+    .top-bar { display: flex; align-items: center; padding: 10px 28px; border-bottom: 1px solid var(--h-border); position: sticky; top: 0; background: var(--h-bg); z-index: 100; gap: 16px; }
+    .search-bar { flex: 1; max-width: 600px; position: relative; }
+    .search-bar input { width: 100%; padding: 10px 14px 10px 40px; border-radius: 8px; border: none; background: var(--h-input-bg); font-size: 14px; color: var(--h-text); outline: none; transition: box-shadow 0.2s; }
     .search-bar input:focus { background: var(--h-bg); box-shadow: 0 1px 6px rgba(32,33,36,0.28); }
-    .search-bar::before { content: '\ud83d\udd0d'; position: absolute; left: 16px; top: 50%; transform: translateY(-50%); font-size: 18px; opacity: 0.5; }
-    .header-actions { display: flex; align-items: center; gap: 12px; }
-    .status-badge { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; background: #e8f5e9; color: #2e7d32; font-size: 13px; font-weight: 500; }
+    .search-bar .search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); font-size: 14px; color: var(--h-sub); }
+    .status-badge { display: flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 20px; background: #e8f5e9; color: #2e7d32; font-size: 13px; font-weight: 500; margin-left: auto; }
     .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; animation: pulse 2s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-    .version-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #818cf8; color: #fff; font-size: 11px; font-weight: 600; margin-left: 8px; }
+    /* Pages */
+    .page { display: none; flex: 1; padding: 24px 28px; }
+    .page.active { display: block; }
+    .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .page-header h2 { font-size: 20px; font-weight: 600; }
 
-    .section-recent { padding: 28px 80px; }
+    /* Category circles (Canva-style) */
+    .category-circles { display: flex; gap: 28px; margin-bottom: 28px; flex-wrap: wrap; }
+    .cat-circle { display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; flex-shrink: 0; }
+    .cat-circle .circle-icon { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: transform 0.2s, box-shadow 0.2s; }
+    .cat-circle:hover .circle-icon { transform: scale(1.08); box-shadow: 0 4px 16px rgba(0,0,0,0.15); }
+    .cat-circle .circle-icon i { font-size: 24px; color: #fff; }
+    .cat-circle .cat-label { font-size: 12px; color: var(--h-sub); font-weight: 500; text-align: center; max-width: 80px; }
+    .cat-circle.active .cat-label { color: var(--h-text); font-weight: 600; }
+
+    /* (preset-grid moved to DCM modal) */
+
+    .version-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #818cf8; color: #fff; font-size: 11px; font-weight: 600; }
     .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
     .section-header h2 { font-size: 16px; font-weight: 500; color: var(--h-text); }
 
@@ -1382,8 +1710,8 @@ export class PreviewServer {
     .decks-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 24px; }
     .deck-card { text-decoration: none; color: inherit; border-radius: 8px; overflow: hidden; border: 1px solid var(--h-card-border); transition: box-shadow 0.2s, transform 0.15s; cursor: pointer; position: relative; }
     .deck-card:hover { box-shadow: 0 4px 16px var(--h-card-hover); transform: translateY(-2px); }
-    .deck-thumb { width: 100%; aspect-ratio: 16/9; overflow: hidden; background: var(--h-thumb-bg); position: relative; }
-    .deck-thumb iframe { width: 1920px; height: 1080px; border: none; pointer-events: none; transform-origin: top left; position: absolute; top: 0; left: 0; }
+    .deck-thumb { width: 100%; aspect-ratio: 16/9; overflow: hidden; background: var(--h-thumb-bg); position: relative; display: flex; align-items: center; justify-content: center; }
+    .deck-thumb iframe { border: none; pointer-events: none; transform-origin: top left; position: absolute; top: 50%; left: 50%; }
     .deck-info { padding: 12px 16px 16px; }
     .deck-title-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
     .deck-title { font-size: 14px; font-weight: 500; color: var(--h-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
@@ -1396,6 +1724,10 @@ export class PreviewServer {
 
     .card-overlay { position: absolute; top: 0; right: 0; display: flex; gap: 4px; padding: 6px; opacity: 0; transition: opacity 0.15s; z-index: 10; }
     .deck-card:hover .card-overlay { opacity: 1; }
+    .fav-btn { position: absolute; top: 6px; left: 6px; border: none; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); color: rgba(255,255,255,0.7); width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; z-index: 10; opacity: 0; transition: all 0.15s; }
+    .deck-card:hover .fav-btn { opacity: 1; }
+    .fav-btn.favorited { opacity: 1; color: #fbbf24; background: rgba(0,0,0,0.6); }
+    .fav-btn:hover { transform: scale(1.15); }
     .overlay-btn { border: none; border-radius: 6px; padding: 4px 8px; font-size: 12px; cursor: pointer; backdrop-filter: blur(4px); transition: background 0.15s; }
     .copy-id-btn { background: rgba(0,0,0,0.6); color: #fff; }
     .copy-id-btn:hover { background: rgba(0,0,0,0.8); }
@@ -1412,6 +1744,41 @@ export class PreviewServer {
     .modal input:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(129,140,248,0.15); }
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
     .modal-actions button { padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; }
+
+    /* === Design Create Modal (Canva-style fullscreen) === */
+    .dcm-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--h-overlay-bg); z-index: 1500; align-items: center; justify-content: center; }
+    .dcm-overlay.open { display: flex; }
+    .dcm-box { background: var(--h-modal-bg); border-radius: 16px; width: 92vw; max-width: 1100px; height: 85vh; max-height: 720px; display: flex; overflow: hidden; box-shadow: 0 24px 64px var(--h-modal-shadow); position: relative; }
+    .dcm-close { position: absolute; top: 16px; right: 16px; border: none; background: none; cursor: pointer; color: var(--h-sub); font-size: 22px; z-index: 10; padding: 4px 8px; border-radius: 6px; transition: all 0.15s; }
+    .dcm-close:hover { background: var(--h-input-bg); color: var(--h-text); }
+    .dcm-sidebar { width: 220px; flex-shrink: 0; border-right: 1px solid var(--h-border); display: flex; flex-direction: column; padding: 24px 0; overflow-y: auto; }
+    .dcm-sidebar h2 { font-size: 20px; font-weight: 700; padding: 0 20px; margin-bottom: 20px; color: var(--h-text); }
+    .dcm-nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px; cursor: pointer; font-size: 14px; color: var(--h-sub); transition: all 0.15s; border: none; background: none; width: 100%; text-align: left; border-radius: 0; }
+    .dcm-nav-item:hover { background: var(--h-input-bg); color: var(--h-text); }
+    .dcm-nav-item.active { background: rgba(99,102,241,0.1); color: #6366f1; font-weight: 600; }
+    .dcm-nav-item .nav-dot { width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .dcm-nav-item .nav-dot i { font-size: 12px; color: #fff; }
+    .dcm-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .dcm-main-header { padding: 20px 28px 12px; flex-shrink: 0; }
+    .dcm-search { width: 100%; padding: 10px 14px 10px 40px; border-radius: 8px; border: 1px solid var(--h-border); background: var(--h-input-bg); font-size: 14px; color: var(--h-text); outline: none; }
+    .dcm-search:focus { border-color: #818cf8; box-shadow: 0 0 0 3px rgba(129,140,248,0.1); }
+    .dcm-search-wrap { position: relative; }
+    .dcm-search-wrap i { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--h-sub); font-size: 14px; }
+    .dcm-body { flex: 1; overflow-y: auto; padding: 8px 28px 28px; }
+    .dcm-body h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--h-text); }
+    .dcm-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 16px; }
+    .dcm-preset { cursor: pointer; border-radius: 12px; overflow: hidden; border: 1px solid var(--h-card-border); transition: all 0.2s; background: var(--h-input-bg); }
+    .dcm-preset:hover { border-color: #6366f1; transform: translateY(-2px); box-shadow: 0 6px 20px var(--h-card-hover); }
+    .dcm-preset .dp-thumb { display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--h-thumb-bg); }
+    .dcm-preset .dp-ratio { border-radius: 6px; border: 1px solid var(--h-border); background: var(--h-modal-bg); display: flex; align-items: center; justify-content: center; }
+    .dcm-preset .dp-ratio span { font-size: 9px; color: var(--h-sub); }
+    .dcm-preset .dp-info { padding: 10px 12px; }
+    .dcm-preset .dp-name { font-size: 13px; font-weight: 600; color: var(--h-text); margin-bottom: 2px; }
+    .dcm-preset .dp-size { font-size: 11px; color: var(--h-sub); }
+    .dcm-custom-row { display: flex; align-items: center; gap: 10px; padding: 16px; background: var(--h-input-bg); border-radius: 12px; border: 1px solid var(--h-card-border); margin-top: 12px; }
+    .dcm-custom-row input { width: 80px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--h-input-border); background: var(--h-modal-bg); color: var(--h-text); font-size: 14px; text-align: center; outline: none; }
+    .dcm-custom-row input:focus { border-color: #818cf8; }
+    .dcm-custom-row span { color: var(--h-sub); font-size: 14px; }
     .btn-cancel { background: var(--h-input-bg); color: var(--h-sub); }
     .btn-cancel:hover { background: var(--h-border); }
     .btn-primary { background: #6366f1; color: #fff; }
@@ -1443,6 +1810,40 @@ export class PreviewServer {
     .t-action-btn:hover { border-color: #6366f1; color: #6366f1; }
     .t-action-btn.primary { background: #6366f1; border-color: #6366f1; color: #fff; }
     .t-action-btn.primary:hover { background: #4f46e5; }
+
+    /* Asset upload & gallery */
+    .asset-tabs { display: flex; gap: 4px; margin-bottom: 20px; border-bottom: 1px solid var(--h-border); padding-bottom: 0; }
+    .asset-tab { padding: 10px 16px; border: none; background: none; color: var(--h-sub); font-size: 13px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; display: flex; align-items: center; gap: 6px; }
+    .asset-tab:hover { color: var(--h-text); }
+    .asset-tab.active { color: #6366f1; border-bottom-color: #6366f1; }
+    .asset-tab i { font-size: 12px; }
+    .asset-tab-body { display: none; }
+    .asset-tab-body.active { display: block; }
+    .asset-upload-zone { border: 2px dashed var(--h-card-border); border-radius: 16px; padding: 32px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--h-input-bg); }
+    .asset-upload-zone:hover { border-color: #6366f1; background: rgba(99,102,241,0.04); }
+    .asset-upload-zone.dragover { border-color: #6366f1; background: rgba(99,102,241,0.08); }
+    .color-swatch { width: 56px; height: 56px; border-radius: 50%; cursor: pointer; position: relative; border: 3px solid var(--h-card-border); transition: all 0.2s; display: flex; flex-direction: column; align-items: center; }
+    .color-swatch:hover { transform: scale(1.1); }
+    .color-swatch .swatch-delete { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; background: #ef4444; color: #fff; border: none; cursor: pointer; font-size: 10px; display: none; align-items: center; justify-content: center; line-height: 1; }
+    .color-swatch:hover .swatch-delete { display: flex; }
+    .color-swatch-wrap { text-align: center; }
+    .color-swatch-label { font-size: 10px; color: var(--h-sub); margin-top: 4px; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .font-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--h-card-border); border-radius: 10px; margin-bottom: 8px; transition: all 0.15s; }
+    .font-item:hover { border-color: #818cf8; }
+    .font-item .font-name { font-size: 14px; font-weight: 500; color: var(--h-text); flex: 1; }
+    .font-item .font-type { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--h-input-bg); color: var(--h-sub); }
+    .font-item .font-delete { border: none; background: none; color: var(--h-sub); cursor: pointer; padding: 4px; border-radius: 4px; transition: all 0.15s; }
+    .font-item .font-delete:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
+    .assets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px; }
+    .asset-card { position: relative; border-radius: 12px; overflow: hidden; border: 1px solid var(--h-card-border); transition: all 0.15s; cursor: pointer; background: var(--h-thumb-bg); aspect-ratio: 1; display: flex; align-items: center; justify-content: center; }
+    .asset-card:hover { border-color: #6366f1; box-shadow: 0 4px 12px var(--h-card-hover); }
+    .asset-card img { max-width: 100%; max-height: 100%; object-fit: contain; padding: 8px; }
+    .asset-card .asset-name { position: absolute; bottom: 0; left: 0; right: 0; padding: 4px 8px; font-size: 10px; color: #fff; background: rgba(0,0,0,0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0; transition: opacity 0.15s; }
+    .asset-card:hover .asset-name { opacity: 1; }
+    .asset-card .asset-delete { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 6px; border: none; background: rgba(239,68,68,0.85); color: #fff; cursor: pointer; font-size: 12px; display: none; align-items: center; justify-content: center; }
+    .asset-card:hover .asset-delete { display: flex; }
+    .asset-card .asset-copy { position: absolute; top: 6px; left: 6px; width: 24px; height: 24px; border-radius: 6px; border: none; background: rgba(0,0,0,0.6); color: #fff; cursor: pointer; font-size: 11px; display: none; align-items: center; justify-content: center; }
+    .asset-card:hover .asset-copy { display: flex; }
 
     .preview-modal { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: var(--h-overlay-bg); z-index: 1000; align-items: center; justify-content: center; }
     .preview-modal.open { display: flex; }
@@ -1484,7 +1885,7 @@ export class PreviewServer {
     .my-tmpl-delete:hover { background: #dc2626; }
     .my-tmpl-card:hover .my-tmpl-delete { display: flex; }
 
-    @media (max-width: 768px) { .section-recent { padding-left: 20px; padding-right: 20px; } .section-my-templates { padding: 0 20px; } .search-bar { margin: 0 16px; } .section-mcp { padding: 0 20px !important; } }
+    @media (max-width: 768px) { .sidebar { width: 56px; } .sidebar-logo { width: 36px; height: 36px; font-size: 14px; } .nav-item { width: 48px; } .nav-item span { display: none; } .main-content { margin-left: 56px; } .page { padding: 16px; } .top-bar { padding: 8px 16px; } }
 
     .mcp-guide-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--h-border); background: transparent; color: var(--h-sub); font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
     .mcp-guide-btn:hover { border-color: #6366f1; color: #6366f1; background: rgba(99,102,241,0.08); }
@@ -1511,60 +1912,196 @@ export class PreviewServer {
   </style>
 </head>
 <body>
-  <div class="top-header">
-    <div class="logo">
-      <div class="logo-icon">SC</div>
-      <div class="logo-text"><span>Slide Harness</span> <span class="version-badge">v2</span></div>
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-logo">SH</div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-page="home" onclick="switchPage('home')">
+        <i class="fa-solid fa-house"></i>
+        <span>\u30db\u30fc\u30e0</span>
+      </button>
+      <button class="nav-item" data-page="projects" onclick="switchPage('projects')">
+        <i class="fa-solid fa-folder-open"></i>
+        <span>\u30d7\u30ed\u30b8\u30a7\u30af\u30c8</span>
+      </button>
+      <button class="nav-item" data-page="templates" onclick="switchPage('templates')">
+        <i class="fa-solid fa-palette"></i>
+        <span>\u30c6\u30f3\u30d7\u30ec</span>
+      </button>
+      <button class="nav-item" data-page="assets" onclick="switchPage('assets')">
+        <i class="fa-solid fa-cloud-arrow-up"></i>
+        <span>MY\u7d20\u6750</span>
+      </button>
+    </nav>
+    <div class="sidebar-bottom">
+      <button class="sidebar-btn" id="themeToggle" onclick="toggleTheme()" title="\u30c6\u30fc\u30de\u5207\u66ff">
+        <i class="fa-solid fa-sun"></i>
+      </button>
+      <button class="sidebar-btn" onclick="toggleMcpGuide()" title="MCP Guide">
+        <i class="fa-solid fa-circle-question"></i>
+      </button>
     </div>
-    <div class="search-bar">
-      <input type="text" placeholder="\u691c\u7d22" id="searchInput" oninput="filterDecks()" />
-    </div>
-    <div class="header-actions">
-      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="\u30c6\u30fc\u30de\u5207\u66ff">\u2600\ufe0f</button>
-      <button class="mcp-guide-btn" onclick="toggleMcpGuide()" title="MCP Connection Guide">?</button>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main-content">
+    <div class="top-bar">
+      <div class="search-bar">
+        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+        <input type="text" placeholder="\u691c\u7d22" id="searchInput" oninput="filterDecks()" />
+      </div>
       <div class="status-badge"><div class="dot"></div>MCP\u63a5\u7d9a\u4e2d</div>
     </div>
-  </div>
 
-  <div class="section-templates" style="padding-top:28px">
-    <div class="section-header">
-      <h2>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h2>
-      <a href="/templates" style="padding:8px 20px;border:none;border-radius:24px;background:transparent;color:#6366f1;font-size:14px;font-weight:500;cursor:pointer;text-decoration:none;display:flex;align-items:center;gap:4px">\u3082\u3063\u3068\u898b\u308b \u2192</a>
-    </div>
-    <div class="templates-grid" id="templatesGrid">
-      <div class="template-card import-card" id="importDrop" onclick="document.getElementById('importFile').click()">
-        <div class="t-thumb" style="display:flex;align-items:center;justify-content:center;background:var(--h-input-bg)">
-          <div style="text-align:center;color:var(--h-sub)">
-            <div style="font-size:48px;margin-bottom:8px">\ud83d\udcc1</div>
-            <div style="font-size:14px;font-weight:500">\u30d5\u30a1\u30a4\u30eb\u3092\u30a4\u30f3\u30dd\u30fc\u30c8</div>
-          </div>
+    <!-- Page: Home -->
+    <div id="page-home" class="page active">
+      <div class="page-header">
+        <h2>\u30db\u30fc\u30e0</h2>
+        <span class="version-badge">v2</span>
+      </div>
+      <div class="category-circles" id="categoryCircles"></div>
+      <div class="section-header">
+        <h2>\u6700\u8fd1\u306e\u30d7\u30ed\u30b8\u30a7\u30af\u30c8</h2>
+        <button class="create-btn" onclick="openDcm()"><i class="fa-solid fa-plus" style="font-size:12px"></i> \u65b0\u898f\u4f5c\u6210</button>
+      </div>
+      <div class="decks-grid" id="homeDecksGrid"></div>
+      <div class="empty-state" id="homeEmptyState" style="display:none">
+        <i class="fa-solid fa-paintbrush" style="font-size:48px;display:block;margin-bottom:16px"></i>
+        <h3>\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093</h3>
+        <p>\u300c+ \u65b0\u898f\u4f5c\u6210\u300d\u30dc\u30bf\u30f3\u307e\u305f\u306fClaude Code\u306eMCP\u30c4\u30fc\u30eb\u3067\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u3092\u4f5c\u6210\u3057\u307e\u3057\u3087\u3046\u3002</p>
+      </div>
+      <div style="margin-top:32px;padding-top:24px;border-top:1px solid var(--h-border)">
+        <div class="section-header">
+          <h2>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u304b\u3089\u59cb\u3081\u308b</h2>
+          <button class="create-btn" onclick="switchPage('templates')" style="font-size:13px"><i class="fa-solid fa-grid-2" style="font-size:12px"></i> \u5168\u3066\u898b\u308b</button>
         </div>
-        <div class="t-body">
-          <div class="t-name">\u30a4\u30f3\u30dd\u30fc\u30c8</div>
-          <div class="t-desc">.pptx, .pdf \u306b\u5bfe\u5fdc</div>
-        </div>
-        <input type="file" id="importFile" accept=".pptx,.pdf" style="display:none" onchange="handleImport(this.files[0])" />
+        <div class="templates-grid" id="homeTemplatesGrid"></div>
       </div>
     </div>
-  </div>
 
-  <div class="section-my-templates" id="myTemplatesSection" style="display:none">
-    <div class="section-header">
-      <h2>\u30de\u30a4\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h2>
+    <!-- Page: Projects -->
+    <div id="page-projects" class="page">
+      <div class="page-header">
+        <h2>\u30d7\u30ed\u30b8\u30a7\u30af\u30c8</h2>
+        <button class="create-btn" onclick="openDcm()"><i class="fa-solid fa-plus" style="font-size:12px"></i> \u65b0\u898f\u4f5c\u6210</button>
+      </div>
+      <div class="decks-grid" id="projectsDecksGrid"></div>
+      <div class="empty-state" id="projectsEmptyState" style="display:none">
+        <i class="fa-solid fa-folder-open" style="font-size:48px;display:block;margin-bottom:16px"></i>
+        <h3>\u30d7\u30ed\u30b8\u30a7\u30af\u30c8\u304c\u3042\u308a\u307e\u305b\u3093</h3>
+        <p>\u300c+ \u65b0\u898f\u4f5c\u6210\u300d\u30dc\u30bf\u30f3\u307e\u305f\u306fClaude Code\u306eMCP\u30c4\u30fc\u30eb\u3067\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u3092\u4f5c\u6210\u3057\u307e\u3057\u3087\u3046\u3002</p>
+      </div>
     </div>
-    <div class="templates-grid" id="myTemplatesGrid"></div>
-  </div>
 
-  <div class="section-recent">
-    <div class="section-header">
-      <h2>\u6700\u8fd1\u4f7f\u7528\u3057\u305f\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3</h2>
-      <button class="create-btn" onclick="openCreateModal()">+ \u65b0\u898f\u4f5c\u6210</button>
+    <!-- Page: Templates -->
+    <div id="page-templates" class="page">
+      <div class="page-header">
+        <h2>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h2>
+      </div>
+      <div class="templates-grid" id="templatesGrid"></div>
     </div>
-    <div class="decks-grid" id="decksGrid"></div>
-    <div class="empty-state" id="emptyState" style="display:none">
-      <div class="icon">\ud83c\udfa8</div>
-      <h3>\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093</h3>
-      <p>\u300c+ \u65b0\u898f\u4f5c\u6210\u300d\u30dc\u30bf\u30f3\u307e\u305f\u306fClaude Code\u306eMCP\u30c4\u30fc\u30eb\u3067\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3\u3092\u4f5c\u6210\u3057\u307e\u3057\u3087\u3046\u3002</p>
+
+    <!-- Page: My Assets -->
+    <div id="page-assets" class="page">
+      <div class="page-header">
+        <h2>MY\u7d20\u6750</h2>
+      </div>
+
+      <!-- Asset Category Tabs -->
+      <div class="asset-tabs">
+        <button class="asset-tab active" data-cat="logo" onclick="switchAssetTab('logo')"><i class="fa-solid fa-star"></i> \u30ed\u30b4</button>
+        <button class="asset-tab" data-cat="photo" onclick="switchAssetTab('photo')"><i class="fa-solid fa-image"></i> \u5199\u771f</button>
+        <button class="asset-tab" data-cat="icon" onclick="switchAssetTab('icon')"><i class="fa-solid fa-icons"></i> \u30a2\u30a4\u30b3\u30f3</button>
+        <button class="asset-tab" data-cat="font" onclick="switchAssetTab('font')"><i class="fa-solid fa-font"></i> \u30d5\u30a9\u30f3\u30c8</button>
+        <button class="asset-tab" data-cat="color" onclick="switchAssetTab('color')"><i class="fa-solid fa-droplet"></i> \u30ab\u30e9\u30fc</button>
+      </div>
+
+      <!-- Tab: Logo / Photo / Icon (shared layout) -->
+      <div class="asset-tab-body active" id="assetTabImage">
+        <div class="asset-upload-zone" id="assetDropZone" onclick="document.getElementById('assetFileInput').click()">
+          <i class="fa-solid fa-cloud-arrow-up" style="font-size:32px;color:#6366f1;margin-bottom:8px"></i>
+          <div style="font-size:14px;font-weight:500;color:var(--h-text)" id="assetUploadLabel">\u753b\u50cf\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9</div>
+          <div style="font-size:12px;color:var(--h-sub);margin-top:4px">PNG, JPG, SVG, WebP, GIF \u306b\u5bfe\u5fdc\u30fb\u30c9\u30e9\u30c3\u30b0&\u30c9\u30ed\u30c3\u30d7\u3082OK</div>
+          <input type="file" id="assetFileInput" accept=".png,.jpg,.jpeg,.gif,.webp,.svg,.ico" multiple style="display:none" onchange="handleAssetUpload(this.files)" />
+        </div>
+        <div style="margin-top:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <span id="assetsCount" style="font-size:12px;color:var(--h-sub)"></span>
+          </div>
+          <div class="assets-grid" id="assetsGrid"></div>
+          <div class="empty-state" id="assetsEmptyState" style="display:none;padding:40px 20px">
+            <i class="fa-solid fa-images" style="font-size:48px;display:block;margin-bottom:16px"></i>
+            <h3>\u307e\u3060\u7d20\u6750\u304c\u3042\u308a\u307e\u305b\u3093</h3>
+            <p>\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9\u3057\u3066\u3001\u3069\u306e\u30c7\u30b6\u30a4\u30f3\u3067\u3082\u4f7f\u3048\u308b\u3088\u3046\u306b\u3057\u307e\u3057\u3087\u3046\u3002</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Font -->
+      <div class="asset-tab-body" id="assetTabFont">
+        <div class="asset-upload-zone" onclick="document.getElementById('fontFileInput').click()">
+          <i class="fa-solid fa-font" style="font-size:32px;color:#6366f1;margin-bottom:8px"></i>
+          <div style="font-size:14px;font-weight:500;color:var(--h-text)">\u30d5\u30a9\u30f3\u30c8\u30d5\u30a1\u30a4\u30eb\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9</div>
+          <div style="font-size:12px;color:var(--h-sub);margin-top:4px">.ttf, .otf, .woff, .woff2 \u306b\u5bfe\u5fdc</div>
+          <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" multiple style="display:none" onchange="handleFontUpload(this.files)" />
+        </div>
+        <div style="margin-top:16px">
+          <div style="display:flex;gap:8px;margin-bottom:16px">
+            <input type="text" id="googleFontInput" placeholder="Google Fonts \u30d5\u30a1\u30df\u30ea\u30fc\u540d (e.g. Noto Sans JP)" style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid var(--h-border);background:var(--h-input-bg);color:var(--h-text);font-size:13px;outline:none" />
+            <button class="create-btn" onclick="addGoogleFont()" style="white-space:nowrap"><i class="fa-solid fa-plus" style="font-size:12px"></i> \u8ffd\u52a0</button>
+          </div>
+          <div id="fontsGrid"></div>
+          <div class="empty-state" id="fontsEmptyState" style="display:none;padding:40px 20px">
+            <i class="fa-solid fa-font" style="font-size:48px;display:block;margin-bottom:16px"></i>
+            <h3>\u30d5\u30a9\u30f3\u30c8\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093</h3>
+            <p>\u30d5\u30a9\u30f3\u30c8\u30d5\u30a1\u30a4\u30eb\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9\u3059\u308b\u304b\u3001Google Fonts\u3092\u8ffd\u52a0\u3057\u307e\u3057\u3087\u3046\u3002</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Color -->
+      <div class="asset-tab-body" id="assetTabColor">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:20px;flex-wrap:wrap">
+          <input type="color" id="colorPickerInput" value="#6366f1" style="width:44px;height:44px;border:none;border-radius:8px;cursor:pointer;padding:0;background:none" />
+          <input type="text" id="colorHexInput" value="#6366f1" placeholder="#RRGGBB" maxlength="7" style="width:100px;padding:8px 12px;border-radius:8px;border:1px solid var(--h-border);background:var(--h-input-bg);color:var(--h-text);font-size:13px;font-family:monospace;outline:none" />
+          <input type="text" id="colorNameInput" placeholder="\u30e9\u30d9\u30eb (\u4efb\u610f)" style="flex:1;min-width:120px;padding:8px 12px;border-radius:8px;border:1px solid var(--h-border);background:var(--h-input-bg);color:var(--h-text);font-size:13px;outline:none" />
+          <button class="create-btn" onclick="addColor()"><i class="fa-solid fa-plus" style="font-size:12px"></i> \u8ffd\u52a0</button>
+        </div>
+        <div id="colorsGrid" style="display:flex;flex-wrap:wrap;gap:12px"></div>
+        <div class="empty-state" id="colorsEmptyState" style="display:none;padding:40px 20px">
+          <i class="fa-solid fa-droplet" style="font-size:48px;display:block;margin-bottom:16px"></i>
+          <h3>\u30ab\u30e9\u30fc\u304c\u307e\u3060\u3042\u308a\u307e\u305b\u3093</h3>
+          <p>\u30d6\u30e9\u30f3\u30c9\u30ab\u30e9\u30fc\u3092\u767b\u9332\u3057\u3066\u3001\u30c7\u30b6\u30a4\u30f3\u3067\u7d71\u4e00\u3057\u305f\u914d\u8272\u3092\u4f7f\u3044\u307e\u3057\u3087\u3046\u3002</p>
+          </div>
+      </div>
+
+      <!-- Template Import (secondary) -->
+      <div style="margin-top:32px;padding-top:24px;border-top:1px solid var(--h-border)">
+        <div class="section-header">
+          <h2>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8\u30a4\u30f3\u30dd\u30fc\u30c8</h2>
+        </div>
+        <div class="templates-grid">
+          <div class="template-card import-card" id="importDrop" onclick="document.getElementById('importFile').click()">
+            <div class="t-thumb" style="display:flex;align-items:center;justify-content:center;background:var(--h-input-bg)">
+              <div style="text-align:center;color:var(--h-sub)">
+                <i class="fa-solid fa-file-import" style="font-size:36px;margin-bottom:8px;display:block"></i>
+                <div style="font-size:14px;font-weight:500">\u30d5\u30a1\u30a4\u30eb\u3092\u30a4\u30f3\u30dd\u30fc\u30c8</div>
+              </div>
+            </div>
+            <div class="t-body">
+              <div class="t-name">\u30a4\u30f3\u30dd\u30fc\u30c8</div>
+              <div class="t-desc">.pptx, .pdf \u306b\u5bfe\u5fdc</div>
+            </div>
+            <input type="file" id="importFile" accept=".pptx,.pdf" style="display:none" onchange="handleImport(this.files[0])" />
+          </div>
+        </div>
+      </div>
+      <div id="myTemplatesSection" style="display:none;margin-top:16px">
+        <div class="section-header">
+          <h2>\u30de\u30a4\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h2>
+        </div>
+        <div class="templates-grid" id="myTemplatesGrid"></div>
+      </div>
     </div>
   </div>
 
@@ -1632,9 +2169,30 @@ export class PreviewServer {
     </div>
   </div>
 
+  <!-- Design Create Modal (Canva-style) -->
+  <div class="dcm-overlay" id="dcmOverlay" onclick="if(event.target===this)closeDcm()">
+    <div class="dcm-box">
+      <button class="dcm-close" onclick="closeDcm()"><i class="fa-solid fa-xmark"></i></button>
+      <div class="dcm-sidebar">
+        <h2>\u30c7\u30b6\u30a4\u30f3\u3092\u4f5c\u6210</h2>
+        <div id="dcmNav"></div>
+      </div>
+      <div class="dcm-main">
+        <div class="dcm-main-header">
+          <div class="dcm-search-wrap">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input class="dcm-search" type="text" placeholder="\u4f55\u3092\u4f5c\u6210\u3057\u307e\u3059\u304b\uff1f" id="dcmSearch" oninput="filterDcmPresets()" />
+          </div>
+        </div>
+        <div class="dcm-body" id="dcmBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fallback simple create modal -->
   <div class="modal-bg" id="createModal">
     <div class="modal">
-      <h3>\u65b0\u898f\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3</h3>
+      <h3>\u65b0\u898f\u4f5c\u6210</h3>
       <input type="text" id="newDeckTitle" placeholder="\u30bf\u30a4\u30c8\u30eb\u3092\u5165\u529b" autofocus />
       <div class="modal-actions">
         <button class="btn-cancel" onclick="closeCreateModal()">\u30ad\u30e3\u30f3\u30bb\u30eb</button>
@@ -1684,6 +2242,136 @@ export class PreviewServer {
     }
     document.addEventListener('DOMContentLoaded', function() { switchMcpTab('claude'); });
 
+    // Page switching
+    function switchPage(page) {
+      document.querySelectorAll('.page').forEach(function(p) { p.classList.remove('active'); });
+      document.querySelectorAll('.nav-item').forEach(function(n) { n.classList.remove('active'); });
+      var pageEl = document.getElementById('page-' + page);
+      if (pageEl) pageEl.classList.add('active');
+      var navEl = document.querySelector('.nav-item[data-page="' + page + '"]');
+      if (navEl) navEl.classList.add('active');
+      history.replaceState(null, '', '#' + page);
+      requestAnimationFrame(function() { scaleThumbs(); scaleTemplateThumbs(); });
+    }
+
+    function scaleTemplateThumbs() {
+      document.querySelectorAll('.template-card .t-thumb').forEach(function(w) {
+        var iframe = w.querySelector('iframe');
+        if (iframe && w.clientWidth > 0) iframe.style.transform = 'scale(' + (w.clientWidth / 1920) + ')';
+      });
+    }
+
+    // Canvas presets data
+    var CANVAS_PRESETS = ${JSON.stringify(CANVAS_PRESETS)};
+
+    var CATEGORIES = [
+      { id: 'presentation', name: '\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3', icon: 'fa-display', gradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
+      { id: 'social', name: 'SNS', icon: 'fa-share-nodes', gradient: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
+      { id: 'print', name: '\u5370\u5237', icon: 'fa-print', gradient: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
+      { id: 'custom', name: '\u30ab\u30b9\u30bf\u30e0', icon: 'fa-plus', gradient: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)' }
+    ];
+
+    var dcmActiveCategory = null;
+
+    // Category circle cards for home page — clicking opens the DCM modal
+    function renderCategories() {
+      var container = document.getElementById('categoryCircles');
+      if (!container) return;
+      container.innerHTML = CATEGORIES.map(function(c) {
+        return '<div class="cat-circle" onclick="openDcm(\\'' + c.id + '\\')">' +
+          '<div class="circle-icon" style="background:' + c.gradient + '"><i class="fa-solid ' + c.icon + '"></i></div>' +
+          '<span class="cat-label">' + c.name + '</span></div>';
+      }).join('');
+    }
+
+    // ===== Design Create Modal =====
+    function openDcm(catId) {
+      document.getElementById('dcmOverlay').classList.add('open');
+      buildDcmNav();
+      dcmSelectCategory(catId || 'presentation');
+    }
+    function closeDcm() {
+      document.getElementById('dcmOverlay').classList.remove('open');
+      document.getElementById('dcmSearch').value = '';
+    }
+
+    function buildDcmNav() {
+      var nav = document.getElementById('dcmNav');
+      nav.innerHTML = CATEGORIES.map(function(c) {
+        return '<button class="dcm-nav-item' + (dcmActiveCategory === c.id ? ' active' : '') + '" onclick="dcmSelectCategory(\\'' + c.id + '\\')">' +
+          '<span class="nav-dot" style="background:' + c.gradient + '"><i class="fa-solid ' + c.icon + '"></i></span>' +
+          '<span>' + c.name + '</span></button>';
+      }).join('');
+    }
+
+    function dcmSelectCategory(catId) {
+      dcmActiveCategory = catId;
+      buildDcmNav();
+      document.getElementById('dcmSearch').value = '';
+      var body = document.getElementById('dcmBody');
+
+      if (catId === 'custom') {
+        body.innerHTML = '<h3>\u30ab\u30b9\u30bf\u30e0\u30b5\u30a4\u30ba</h3>' +
+          '<p style="font-size:13px;color:var(--h-sub);margin-bottom:16px">\u4efb\u610f\u306e\u30b5\u30a4\u30ba\u3067\u30c7\u30b6\u30a4\u30f3\u3092\u4f5c\u6210\u3067\u304d\u307e\u3059</p>' +
+          '<div class="dcm-custom-row">' +
+          '<input type="number" id="dcmCustomW" value="1920" min="100" max="10000" />' +
+          '<span>x</span>' +
+          '<input type="number" id="dcmCustomH" value="1080" min="100" max="10000" />' +
+          '<span>px</span>' +
+          '<button class="create-btn" onclick="dcmCreateCustom()" style="margin-left:auto"><i class="fa-solid fa-plus" style="font-size:12px"></i> \u4f5c\u6210</button>' +
+          '</div>';
+        return;
+      }
+
+      var presets = CANVAS_PRESETS.filter(function(p) { return p.category === catId; });
+
+      renderDcmPresets(presets);
+    }
+
+    function renderDcmPresets(presets) {
+      var body = document.getElementById('dcmBody');
+      var maxDim = 90;
+      var html = '<div class="dcm-preset-grid">';
+      presets.forEach(function(p) {
+        var ratio = p.width / p.height;
+        var pw, ph;
+        if (ratio >= 1) { pw = maxDim; ph = Math.round(maxDim / ratio); }
+        else { ph = maxDim; pw = Math.round(maxDim * ratio); }
+        html += '<div class="dcm-preset" onclick="dcmCreate(\\'' + escHtml(p.label) + '\\',' + p.width + ',' + p.height + ')">' +
+          '<div class="dp-thumb"><div class="dp-ratio" style="width:' + pw + 'px;height:' + ph + 'px"><span>' + p.width + 'x' + p.height + '</span></div></div>' +
+          '<div class="dp-info"><div class="dp-name">' + escHtml(p.label) + '</div>' +
+          '<div class="dp-size">' + p.width + ' x ' + p.height + ' px</div></div></div>';
+      });
+      html += '</div>';
+      body.innerHTML = html;
+    }
+
+    function filterDcmPresets() {
+      var q = document.getElementById('dcmSearch').value.toLowerCase();
+      if (!q) { dcmSelectCategory(dcmActiveCategory); return; }
+      var filtered = CANVAS_PRESETS.filter(function(p) {
+        return p.label.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || (p.width + 'x' + p.height).includes(q);
+      });
+      renderDcmPresets(filtered);
+    }
+
+    function dcmCreate(label, w, h) {
+      fetch('/api/decks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: label, canvasSize: { width: w, height: h } })
+      }).then(function(r) { return r.json(); })
+        .then(function(d) { closeDcm(); window.location.href = '/preview/' + d.id; });
+    }
+
+    function dcmCreateCustom() {
+      var w = parseInt(document.getElementById('dcmCustomW').value) || 1920;
+      var h = parseInt(document.getElementById('dcmCustomH').value) || 1080;
+      if (w < 100) w = 100; if (w > 10000) w = 10000;
+      if (h < 100) h = 100; if (h > 10000) h = 10000;
+      dcmCreate(w + 'x' + h + ' \u30c7\u30b6\u30a4\u30f3', w, h);
+    }
+
     const allDecks = ${decksJson};
 
     function formatDate(iso) {
@@ -1698,24 +2386,63 @@ export class PreviewServer {
       return d.getFullYear() + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + String(d.getDate()).padStart(2,'0');
     }
 
-    function renderDecks() {
-      const grid = document.getElementById('decksGrid');
-      const empty = document.getElementById('emptyState');
-      if (allDecks.length === 0) { grid.style.display = 'none'; empty.style.display = ''; return; }
-      empty.style.display = 'none'; grid.style.display = '';
-      grid.innerHTML = allDecks.map(d => '<a href="/preview/' + d.id + '" class="deck-card" data-id="' + d.id + '">'
+    function deckCardHtml(d) {
+      var favClass = d.favorite ? ' favorited' : '';
+      var favIcon = d.favorite ? 'fa-solid fa-star' : 'fa-regular fa-star';
+      return '<a href="/preview/' + d.id + '" class="deck-card" data-id="' + d.id + '">'
+        + '<button class="fav-btn' + favClass + '" onclick="toggleFav(event,\\'' + d.id + '\\')" title="\u304a\u6c17\u306b\u5165\u308a"><i class="' + favIcon + '"></i></button>'
         + '<div class="card-overlay">'
-        + '<button class="overlay-btn copy-id-btn" onclick="copyId(event,\\'' + d.id + '\\')" title="ID\u3092\u30b3\u30d4\u30fc">\ud83d\udccb ' + d.id + '</button>'
-        + '<button class="overlay-btn delete-btn" onclick="deleteDeck(event,\\'' + d.id + '\\')" title="\u524a\u9664">\ud83d\uddd1</button>'
+        + '<button class="overlay-btn copy-id-btn" onclick="copyId(event,\\'' + d.id + '\\')" title="ID\u3092\u30b3\u30d4\u30fc"><i class="fa-regular fa-clipboard"></i> ' + d.id + '</button>'
+        + '<button class="overlay-btn delete-btn" onclick="deleteDeck(event,\\'' + d.id + '\\')" title="\u524a\u9664"><i class="fa-solid fa-trash-can"></i></button>'
         + '</div>'
-        + '<div class="deck-thumb"><iframe src="/api/decks/' + d.id + '/thumbnail" loading="lazy" scrolling="no"></iframe></div>'
+        + '<div class="deck-thumb" data-cw="' + (d.cw || 1920) + '" data-ch="' + (d.ch || 1080) + '"><iframe src="/api/decks/' + d.id + '/thumbnail" loading="lazy" scrolling="no" style="width:' + (d.cw || 1920) + 'px;height:' + (d.ch || 1080) + 'px"></iframe></div>'
         + '<div class="deck-info">'
         + '<div class="deck-title-row">'
         + '<span class="deck-title">' + escHtml(d.title) + '</span>'
-        + '<button class="edit-title-btn" onclick="startEditTitle(event,\\'' + d.id + '\\')" title="\u540d\u524d\u3092\u5909\u66f4">\u270f\ufe0f</button>'
+        + '<button class="edit-title-btn" onclick="startEditTitle(event,\\'' + d.id + '\\')" title="\u540d\u524d\u3092\u5909\u66f4"><i class="fa-solid fa-pen" style="font-size:11px"></i></button>'
         + '</div>'
         + '<div class="deck-meta"><span class="deck-badge">' + d.slides + ' slides</span><span class="deck-date">' + formatDate(d.updatedAt) + '</span></div>'
-        + '</div></a>').join('');
+        + '</div></a>';
+    }
+
+    function toggleFav(e, id) {
+      e.preventDefault(); e.stopPropagation();
+      var deck = allDecks.find(function(d) { return d.id === id; });
+      if (!deck) return;
+      deck.favorite = !deck.favorite;
+      fetch('/api/decks/' + id, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metadata: { favorite: deck.favorite } })
+      });
+      sortDecks();
+      renderDecks();
+    }
+
+    function sortDecks() {
+      allDecks.sort(function(a, b) {
+        if (a.favorite && !b.favorite) return -1;
+        if (!a.favorite && b.favorite) return 1;
+        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      });
+    }
+
+    function renderDecks() {
+      var homeGrid = document.getElementById('homeDecksGrid');
+      var homeEmpty = document.getElementById('homeEmptyState');
+      var projGrid = document.getElementById('projectsDecksGrid');
+      var projEmpty = document.getElementById('projectsEmptyState');
+      if (allDecks.length === 0) {
+        if (homeGrid) homeGrid.style.display = 'none';
+        if (homeEmpty) homeEmpty.style.display = '';
+        if (projGrid) projGrid.style.display = 'none';
+        if (projEmpty) projEmpty.style.display = '';
+      } else {
+        if (homeEmpty) homeEmpty.style.display = 'none';
+        if (projEmpty) projEmpty.style.display = 'none';
+        if (homeGrid) { homeGrid.style.display = ''; homeGrid.innerHTML = allDecks.slice(0, 8).map(deckCardHtml).join(''); }
+        if (projGrid) { projGrid.style.display = ''; projGrid.innerHTML = allDecks.map(deckCardHtml).join(''); }
+      }
       requestAnimationFrame(scaleThumbs);
     }
 
@@ -1730,15 +2457,19 @@ export class PreviewServer {
     }
 
     // Create modal
-    function openCreateModal() {
+    var pendingCanvasSize = null;
+    function openCreateModal(canvasSize) {
+      pendingCanvasSize = canvasSize || null;
       document.getElementById('createModal').classList.add('open');
       const input = document.getElementById('newDeckTitle');
       input.value = ''; input.focus();
     }
-    function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); }
+    function closeCreateModal() { document.getElementById('createModal').classList.remove('open'); pendingCanvasSize = null; }
     function createNewDeck() {
       const title = document.getElementById('newDeckTitle').value.trim() || 'Untitled';
-      fetch('/api/decks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) })
+      var body = { title: title };
+      if (pendingCanvasSize) body.canvasSize = pendingCanvasSize;
+      fetch('/api/decks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(r => r.json())
         .then(d => { window.location.href = '/preview/' + d.id; });
     }
@@ -1758,35 +2489,35 @@ export class PreviewServer {
     let previewSlideIndex = 0;
     let previewBlobUrls = [];
 
-    // Render template cards - click to open preview
+    // Render template cards from seeded decks - click to open preview
     (function renderTemplateCards() {
-      const grid = document.getElementById('templatesGrid');
-      if (!grid) return;
-      ['business', 'tech', 'pitch'].forEach(function(id) {
-        const slides = templateSlides[id];
-        if (!slides || !slides.length) return;
-        const firstHtml = wrapSlideHtml(slides[0].html);
-        const blob = new Blob([firstHtml], { type: 'text/html' });
-        const blobUrl = URL.createObjectURL(blob);
-        const card = document.createElement('div');
-        card.className = 'template-card';
-        card.onclick = function() { openTemplatePreview(id); };
-        card.innerHTML = '<div class="t-thumb"><iframe src="' + blobUrl + '" scrolling="no" loading="lazy"></iframe></div>' +
-          '<div class="t-body"><div class="t-name">' + (templateNames[id] || id) + '</div>' +
-          '<div class="t-desc">' + (templateDescs[id] || '') + '</div>' +
-          '<div class="t-count">' + slides.length + '\u679a \u30fb ID: <code style="font-family:monospace;color:#6366f1">' + id + '</code></div></div>';
-        grid.appendChild(card);
+      var SEED_TEMPLATES = ${templatesJson};
+      var grids = [document.getElementById('templatesGrid'), document.getElementById('homeTemplatesGrid')];
+      grids.forEach(function(grid) {
+        if (!grid) return;
+        SEED_TEMPLATES.forEach(function(tpl) {
+          var blob = new Blob([tpl.firstHtml], { type: 'text/html' });
+          var blobUrl = URL.createObjectURL(blob);
+          var card = document.createElement('div');
+          card.className = 'template-card';
+          card.onclick = function() { window.location.href = '/preview/' + tpl.id; };
+          card.innerHTML = '<div class="t-thumb"><iframe src="' + blobUrl + '" scrolling="no" loading="lazy"></iframe></div>' +
+            '<div class="t-body"><div class="t-name">' + tpl.title + '</div>' +
+            '<div class="t-desc">' + tpl.desc + '</div>' +
+            '<div class="t-count"><i class="fa-solid fa-layer-group" style="font-size:10px"></i> ' + tpl.slideCount + '\u30da\u30fc\u30b8</div></div>';
+          grid.appendChild(card);
+        });
       });
       requestAnimationFrame(function() {
         document.querySelectorAll('.template-card .t-thumb').forEach(function(w) {
           var iframe = w.querySelector('iframe');
-          if (iframe) iframe.style.transform = 'scale(' + (w.clientWidth / 1920) + ')';
+          if (iframe && w.clientWidth > 0) iframe.style.transform = 'scale(' + (w.clientWidth / 1280) + ')';
         });
       });
       window.addEventListener('resize', function() {
         document.querySelectorAll('.template-card .t-thumb').forEach(function(w) {
           var iframe = w.querySelector('iframe');
-          if (iframe) iframe.style.transform = 'scale(' + (w.clientWidth / 1920) + ')';
+          if (iframe && w.clientWidth > 0) iframe.style.transform = 'scale(' + (w.clientWidth / 1280) + ')';
         });
       });
     })();
@@ -1929,13 +2660,207 @@ export class PreviewServer {
 
     loadMyTemplates();
 
+    // ===== Asset Tabs =====
+    var currentAssetTab = 'logo';
+    var uploadLabels = { logo: '\u30ed\u30b4\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9', photo: '\u5199\u771f\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9', icon: '\u30a2\u30a4\u30b3\u30f3\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9' };
+
+    function switchAssetTab(tab) {
+      currentAssetTab = tab;
+      document.querySelectorAll('.asset-tab').forEach(function(t) { t.classList.toggle('active', t.dataset.cat === tab); });
+      document.querySelectorAll('.asset-tab-body').forEach(function(b) { b.classList.remove('active'); });
+      if (tab === 'font') { document.getElementById('assetTabFont').classList.add('active'); loadFonts(); }
+      else if (tab === 'color') { document.getElementById('assetTabColor').classList.add('active'); loadColors(); }
+      else {
+        document.getElementById('assetTabImage').classList.add('active');
+        var label = document.getElementById('assetUploadLabel');
+        if (label) label.textContent = uploadLabels[tab] || '\u753b\u50cf\u3092\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9';
+        loadAssets();
+      }
+    }
+
+    // ===== Global Assets =====
+    function handleAssetUpload(files) {
+      if (!files || !files.length) return;
+      Array.from(files).forEach(function(file) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+          fetch('/api/assets', {
+            method: 'POST',
+            headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name), 'X-Category': currentAssetTab },
+            body: e.target.result,
+          })
+          .then(function(r) { return r.ok ? r.json() : r.json().then(function(err) { throw new Error(err.error); }); })
+          .then(function() { loadAssets(); })
+          .catch(function(err) { alert('\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9\u5931\u6557: ' + err.message); });
+        };
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function loadAssets() {
+      var cat = currentAssetTab;
+      if (cat === 'font' || cat === 'color') return;
+      fetch('/api/assets?category=' + cat).then(function(r) { return r.json(); }).then(function(assets) {
+        var grid = document.getElementById('assetsGrid');
+        var empty = document.getElementById('assetsEmptyState');
+        var count = document.getElementById('assetsCount');
+        if (!assets || assets.length === 0) {
+          grid.style.display = 'none';
+          empty.style.display = '';
+          count.textContent = '';
+          return;
+        }
+        grid.style.display = '';
+        empty.style.display = 'none';
+        count.textContent = assets.length + '\u4ef6';
+        grid.innerHTML = assets.map(function(a) {
+          return '<div class="asset-card">'
+            + '<button class="asset-copy" onclick="event.stopPropagation();copyAssetUrl(\\'' + a.id + '\\', \\'' + escHtml(a.url) + '\\')" title="URL\u3092\u30b3\u30d4\u30fc"><i class="fa-regular fa-clipboard"></i></button>'
+            + '<button class="asset-delete" onclick="event.stopPropagation();deleteAsset(\\'' + a.id + '\\')" title="\u524a\u9664"><i class="fa-solid fa-xmark"></i></button>'
+            + '<img src="' + escHtml(a.url) + '" alt="' + escHtml(a.originalName) + '" loading="lazy" />'
+            + '<div class="asset-name">' + escHtml(a.originalName) + '</div>'
+            + '</div>';
+        }).join('');
+      }).catch(function() {});
+    }
+
+    function copyAssetUrl(id, url) {
+      var fullUrl = location.origin + url;
+      navigator.clipboard.writeText(fullUrl).then(function() {
+        var btn = document.querySelector('.asset-card .asset-copy');
+        if (btn) { btn.innerHTML = '<i class="fa-solid fa-check"></i>'; setTimeout(function() { btn.innerHTML = '<i class="fa-regular fa-clipboard"></i>'; }, 1500); }
+      });
+    }
+
+    function deleteAsset(id) {
+      if (!confirm('\u3053\u306e\u7d20\u6750\u3092\u524a\u9664\u3057\u307e\u3059\u304b\uff1f')) return;
+      fetch('/api/assets/' + id, { method: 'DELETE' }).then(function() { loadAssets(); });
+    }
+
+    // Asset drag & drop zone
+    var assetZone = document.getElementById('assetDropZone');
+    if (assetZone) {
+      assetZone.addEventListener('dragover', function(e) { e.preventDefault(); assetZone.classList.add('dragover'); });
+      assetZone.addEventListener('dragleave', function() { assetZone.classList.remove('dragover'); });
+      assetZone.addEventListener('drop', function(e) { e.preventDefault(); assetZone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleAssetUpload(e.dataTransfer.files); });
+    }
+
+    // ===== Colors =====
+    var colorPicker = document.getElementById('colorPickerInput');
+    var colorHex = document.getElementById('colorHexInput');
+    if (colorPicker && colorHex) {
+      colorPicker.addEventListener('input', function() { colorHex.value = colorPicker.value; });
+      colorHex.addEventListener('input', function() { if (/^#[0-9a-fA-F]{6}$/.test(colorHex.value)) colorPicker.value = colorHex.value; });
+    }
+
+    function addColor() {
+      var hex = document.getElementById('colorHexInput').value.trim();
+      var name = document.getElementById('colorNameInput').value.trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(hex)) { alert('HEX\u30ab\u30e9\u30fc\u3092 #RRGGBB \u5f62\u5f0f\u3067\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044'); return; }
+      fetch('/api/colors', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hex: hex, name: name || undefined }) })
+        .then(function(r) { return r.ok ? r.json() : r.json().then(function(err) { throw new Error(err.error); }); })
+        .then(function() { document.getElementById('colorNameInput').value = ''; loadColors(); })
+        .catch(function(err) { alert(err.message); });
+    }
+
+    function loadColors() {
+      fetch('/api/colors').then(function(r) { return r.json(); }).then(function(colors) {
+        var grid = document.getElementById('colorsGrid');
+        var empty = document.getElementById('colorsEmptyState');
+        if (!colors || colors.length === 0) { grid.innerHTML = ''; empty.style.display = ''; return; }
+        empty.style.display = 'none';
+        grid.innerHTML = colors.map(function(c) {
+          return '<div class="color-swatch-wrap">'
+            + '<div class="color-swatch" style="background:' + escHtml(c.hex) + '" onclick="copyColorHex(\\'' + escHtml(c.hex) + '\\')" title="\u30af\u30ea\u30c3\u30af\u3067\u30b3\u30d4\u30fc: ' + escHtml(c.hex) + '">'
+            + '<button class="swatch-delete" onclick="event.stopPropagation();deleteColor(\\'' + c.id + '\\')" title="\u524a\u9664"><i class="fa-solid fa-xmark"></i></button>'
+            + '</div>'
+            + '<div class="color-swatch-label">' + escHtml(c.name || c.hex) + '</div>'
+            + '</div>';
+        }).join('');
+      }).catch(function() {});
+    }
+
+    function copyColorHex(hex) {
+      navigator.clipboard.writeText(hex).then(function() {
+        showToast(hex + ' \u3092\u30b3\u30d4\u30fc\u3057\u307e\u3057\u305f');
+      });
+    }
+
+    function deleteColor(id) {
+      if (!confirm('\u3053\u306e\u30ab\u30e9\u30fc\u3092\u524a\u9664\u3057\u307e\u3059\u304b\uff1f')) return;
+      fetch('/api/colors/' + id, { method: 'DELETE' }).then(function() { loadColors(); });
+    }
+
+    // ===== Fonts =====
+    function handleFontUpload(files) {
+      if (!files || !files.length) return;
+      Array.from(files).forEach(function(file) {
+        var reader = new FileReader();
+        reader.onload = function(e) {
+          fetch('/api/fonts', {
+            method: 'POST',
+            headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name) },
+            body: e.target.result,
+          })
+          .then(function(r) { return r.ok ? r.json() : r.json().then(function(err) { throw new Error(err.error); }); })
+          .then(function() { loadFonts(); })
+          .catch(function(err) { alert('\u30a2\u30c3\u30d7\u30ed\u30fc\u30c9\u5931\u6557: ' + err.message); });
+        };
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function addGoogleFont() {
+      var family = document.getElementById('googleFontInput').value.trim();
+      if (!family) { alert('Google Fonts\u306e\u30d5\u30a1\u30df\u30ea\u30fc\u540d\u3092\u5165\u529b\u3057\u3066\u304f\u3060\u3055\u3044'); return; }
+      fetch('/api/fonts/google', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ family: family }) })
+        .then(function(r) { return r.ok ? r.json() : r.json().then(function(err) { throw new Error(err.error); }); })
+        .then(function() { document.getElementById('googleFontInput').value = ''; loadFonts(); })
+        .catch(function(err) { alert(err.message); });
+    }
+
+    function loadFonts() {
+      fetch('/api/fonts').then(function(r) { return r.json(); }).then(function(fonts) {
+        var grid = document.getElementById('fontsGrid');
+        var empty = document.getElementById('fontsEmptyState');
+        if (!fonts || fonts.length === 0) { grid.innerHTML = ''; empty.style.display = ''; return; }
+        empty.style.display = 'none';
+        grid.innerHTML = fonts.map(function(f) {
+          var typeLabel = f.type === 'google' ? 'Google' : 'Upload';
+          var preview = f.type === 'google'
+            ? '<span style="font-family:\\'' + escHtml(f.googleFamily) + '\\',sans-serif">Aa\u3042\u3044\u3046</span>'
+            : '<span>' + escHtml(f.name) + '</span>';
+          return '<div class="font-item">'
+            + '<div class="font-name">' + escHtml(f.name) + '</div>'
+            + '<span class="font-type">' + typeLabel + '</span>'
+            + '<button class="font-delete" onclick="deleteFont(\\'' + f.id + '\\')" title="\u524a\u9664"><i class="fa-solid fa-trash"></i></button>'
+            + '</div>';
+        }).join('');
+        // Load Google Fonts CSS for previews
+        var googleFonts = fonts.filter(function(f) { return f.type === 'google'; });
+        if (googleFonts.length > 0) {
+          var families = googleFonts.map(function(f) { return f.googleFamily.replace(/ /g, '+'); }).join('&family=');
+          var link = document.getElementById('googleFontsLink');
+          if (!link) { link = document.createElement('link'); link.id = 'googleFontsLink'; link.rel = 'stylesheet'; document.head.appendChild(link); }
+          link.href = 'https://fonts.googleapis.com/css2?family=' + families + '&display=swap';
+        }
+      }).catch(function() {});
+    }
+
+    function deleteFont(id) {
+      if (!confirm('\u3053\u306e\u30d5\u30a9\u30f3\u30c8\u3092\u524a\u9664\u3057\u307e\u3059\u304b\uff1f')) return;
+      fetch('/api/fonts/' + id, { method: 'DELETE' }).then(function() { loadFonts(); });
+    }
+
+    loadAssets();
+
     // Copy deck ID
     function copyId(e, id) {
       e.preventDefault(); e.stopPropagation();
       navigator.clipboard.writeText(id).then(() => {
         const btn = e.currentTarget;
-        btn.textContent = '\u2713 \u30b3\u30d4\u30fc\u6e08\u307f';
-        setTimeout(() => { btn.textContent = '\ud83d\udccb ' + id; }, 1500);
+        btn.innerHTML = '<i class="fa-solid fa-check"></i> \u30b3\u30d4\u30fc\u6e08\u307f';
+        setTimeout(() => { btn.innerHTML = '<i class="fa-regular fa-clipboard"></i> ' + id; }, 1500);
       });
     }
 
@@ -1981,30 +2906,52 @@ export class PreviewServer {
       document.querySelectorAll('.deck-thumb').forEach(thumb => {
         const iframe = thumb.querySelector('iframe');
         if (!iframe) return;
-        const scale = thumb.clientWidth / 1920;
+        const cw = parseInt(thumb.dataset.cw) || 1920;
+        const ch = parseInt(thumb.dataset.ch) || 1080;
+        var tw = thumb.clientWidth;
+        var th = thumb.clientHeight;
+        if (tw <= 0 || th <= 0) return;
+        var scale = Math.min(tw / cw, th / ch);
         iframe.style.transform = 'scale(' + scale + ')';
+        iframe.style.left = ((tw - cw * scale) / 2) + 'px';
+        iframe.style.top = ((th - ch * scale) / 2) + 'px';
       });
     }
-    window.addEventListener('resize', scaleThumbs);
+    window.addEventListener('resize', function() { scaleThumbs(); scaleTemplateThumbs(); });
 
     // Theme
     function toggleTheme() {
       const html = document.documentElement;
       const next = html.dataset.theme === 'dark' ? 'light' : 'dark';
       html.dataset.theme = next;
-      document.getElementById('themeToggle').textContent = next === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
+      document.getElementById('themeToggle').innerHTML = next === 'dark' ? '<i class="fa-solid fa-moon"></i>' : '<i class="fa-solid fa-sun"></i>';
       localStorage.setItem('slideharness-theme', next);
     }
     (function initTheme() {
       const saved = localStorage.getItem('slideharness-theme');
       if (saved) {
         document.documentElement.dataset.theme = saved;
-        document.getElementById('themeToggle').textContent = saved === 'dark' ? '\ud83c\udf19' : '\u2600\ufe0f';
+        document.getElementById('themeToggle').innerHTML = saved === 'dark' ? '<i class="fa-solid fa-moon"></i>' : '<i class="fa-solid fa-sun"></i>';
       }
     })();
 
+    renderCategories();
+    sortDecks();
     renderDecks();
-    window.addEventListener('load', scaleThumbs);
+    // Hash navigation restore
+    (function initPage() {
+      var hash = location.hash.replace('#', '');
+      if (['home', 'projects', 'templates', 'assets'].indexOf(hash) >= 0) {
+        switchPage(hash);
+      }
+    })();
+    window.addEventListener('load', function() { scaleThumbs(); scaleTemplateThumbs(); });
+    window.addEventListener('hashchange', function() {
+      var hash = location.hash.replace('#', '');
+      if (['home', 'projects', 'templates', 'assets'].indexOf(hash) >= 0) {
+        switchPage(hash);
+      }
+    });
   </script>
 </body>
 </html>`);

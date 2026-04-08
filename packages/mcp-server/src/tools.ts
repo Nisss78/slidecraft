@@ -4,6 +4,8 @@ import { basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { exportToHtml, exportToPdf, exportToPng, exportToPptx } from '@slideharness/export';
+import { CANVAS_PRESETS, resolveCanvasSize, getCanvasDimensions } from '@slideharness/renderer';
+import type { CanvasSize } from '@slideharness/renderer';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { JsonFileStorage } from '@slideharness/core';
 import {
@@ -31,18 +33,30 @@ export function registerTools(
 
   server.tool(
     'create_deck',
-    'Create a new slide deck',
+    'Create a new slide deck. Use canvasSize to set a preset (e.g. "instagram-post", "a4") or custom {width, height}.',
     {
       title: z.string().describe('Deck title'),
       author: z.string().optional().describe('Author name'),
+      canvasSize: z.union([
+        z.string().describe('Preset ID (e.g. "16:9", "instagram-post", "a4"). Use list_canvas_presets to see options.'),
+        z.object({ width: z.number(), height: z.number() }).describe('Custom canvas size in pixels'),
+      ]).optional().describe('Canvas size preset or custom dimensions (default: 16:9 = 1920x1080)'),
     },
     async (params) => {
-      const deck = createDeck(params);
+      const { canvasSize: canvasSizeInput, ...deckParams } = params;
+      const resolved = canvasSizeInput ? getCanvasDimensions(canvasSizeInput as string | CanvasSize) : undefined;
+      const metadata = resolved ? { canvasSize: canvasSizeInput } : undefined;
+      const deck = createDeck({ ...deckParams, metadata });
       await storage.saveDeck(deck);
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({ success: true, deckId: deck.id, title: deck.title }, null, 2),
+          text: JSON.stringify({
+            success: true,
+            deckId: deck.id,
+            title: deck.title,
+            ...(resolved ? { canvasSize: resolved } : {}),
+          }, null, 2),
         }],
       };
     },
@@ -415,8 +429,18 @@ DESIGN RULES: (1) Do NOT use Inter/Roboto/Arial - use theme Google Fonts. (2) Do
       audience: z.enum(['executive', 'engineer', 'designer', 'student', 'general']).optional().describe('Target audience — executives: C-suite CEO, engineers: technical depth, designers: visual focus, students: learning context, general: broad audience'),
       tone: z.enum(['formal', 'casual', 'technical', 'persuasive']).optional().describe('Presentation tone — formal: corporate, casual: friendly, technical: deep, persuasive: convincing'),
       templateId: z.string().optional().describe('Optional PPTX template ID to base style on'),
+      canvasSize: z.union([
+        z.string().describe('Preset ID (e.g. "instagram-post", "a4")'),
+        z.object({ width: z.number(), height: z.number() }).describe('Custom canvas size in pixels'),
+      ]).optional().describe('Canvas size preset or custom dimensions (default: 16:9 = 1920x1080)'),
+      format: z.string().optional().describe('Output format: presentation, instagram-post, instagram-story, youtube-thumbnail, x-post, pinterest-pin, linkedin-post, a4. Auto-resolves canvasSize and slideCount for single-design formats.'),
     },
-    async ({ topic, slideCount, themeId, stylePreset, audience, tone, templateId }) => {
+    async ({ topic, slideCount, themeId, stylePreset, audience, tone, templateId, canvasSize: canvasSizeInput, format }) => {
+      // Format-based auto-resolution
+      const SINGLE_DESIGN_FORMATS = ['instagram-post', 'instagram-story', 'youtube-thumbnail', 'x-post', 'pinterest-pin', 'a4'];
+      const isSingleDesign = format != null && SINGLE_DESIGN_FORMATS.includes(format);
+      const effectiveSlideCount = isSingleDesign ? 1 : slideCount;
+      const effectiveCanvasSize = canvasSizeInput ?? format ?? '16:9';
       // Resolve theme (stylePreset overrides themeId)
       const resolvedThemeId = stylePreset ?? themeId ?? 'genspark';
       const theme = registry.getTheme(resolvedThemeId) ?? registry.getTheme('genspark')!;
@@ -425,64 +449,82 @@ DESIGN RULES: (1) Do NOT use Inter/Roboto/Arial - use theme Google Fonts. (2) Do
         typography: theme.typography,
       };
 
+      const resolvedDims = effectiveCanvasSize !== '16:9' || canvasSizeInput
+        ? getCanvasDimensions(effectiveCanvasSize as string | CanvasSize)
+        : { width: 1920, height: 1080 };
+
       const deck = createDeck({
         title: topic,
-        description: `Generated presentation about: ${topic}`,
+        description: isSingleDesign ? `${format} design: ${topic}` : `Generated presentation about: ${topic}`,
+        metadata: { canvasSize: effectiveCanvasSize, ...(format ? { format } : {}) },
       });
 
       // Build per-slide structure with layout hints
       const slideStructure: Array<{ title: string; layout: string; hint: string }> = [];
 
-      // Always start with title
-      slideStructure.push({
-        title: 'タイトル',
-        layout: 'title',
-        hint: 'Title slide: centered h1 + subtitle. Use .sh-accent-circle for decorative background. Badge with category.',
-      });
-
-      // Always second: overview
-      if (slideCount >= 2) {
+      if (isSingleDesign) {
+        // Single-design formats: one canvas, no slide deck structure
         slideStructure.push({
-          title: '概要',
-          layout: 'content',
-          hint: 'Overview/agenda: use .sh-header with .sh-badge, then .sh-list for agenda items. 3-layer structure: header→main→footer.',
+          title: topic,
+          layout: 'single-design',
+          hint: `Single ${format} design. Full visual composition — NOT a slide deck page. No headers/footers/bullet lists.`,
         });
-      }
+      } else {
+        // Presentation / multi-slide formats
+        // Always start with title
+        slideStructure.push({
+          title: 'タイトル',
+          layout: 'title',
+          hint: 'Title slide: centered h1 + subtitle. Use .sh-accent-circle for decorative background. Badge with category.',
+        });
 
-      // Middle content slides
-      const contentLayouts = [
-        { title: 'コンテンツ', layout: 'two-column', hint: 'Two-column layout: use .sh-grid-2 with .sh-card elements. Highlight keywords with var(--color-primary).' },
-        { title: '詳細データ', layout: 'split-60-40', hint: '60/40 split: text content on left, Chart.js canvas on right. Use <canvas id="chartN"> + <script> for chart.' },
-        { title: '比較・特徴', layout: 'three-column', hint: 'Three-column grid: use .sh-grid-3 with .sh-card. Each card has icon (Font Awesome) + title + description.' },
-        { title: '分析', layout: 'split-half', hint: '50/50 split: left side with var(--color-surface) background, right side with main content or chart.' },
-        { title: 'ポイント', layout: 'content', hint: 'Content with .sh-list. Use .sh-section-heading for sub-sections. Density: 3-4 content blocks per slide.' },
-        { title: 'データ可視化', layout: 'data-chart', hint: 'Data visualization: text points on left, Chart.js (bar/doughnut/line) on right. Use theme colors for chart datasets.' },
-      ];
+        // Always second: overview
+        if (effectiveSlideCount >= 2) {
+          slideStructure.push({
+            title: '概要',
+            layout: 'content',
+            hint: 'Overview/agenda: use .sh-header with .sh-badge, then .sh-list for agenda items. 3-layer structure: header→main→footer.',
+          });
+        }
 
-      const middleCount = Math.max(0, slideCount - 2);
-      for (let i = 0; i < middleCount; i++) {
-        const tpl = contentLayouts[i % contentLayouts.length];
-        slideStructure.push(tpl);
-      }
+        // Middle content slides
+        const contentLayouts = [
+          { title: 'コンテンツ', layout: 'two-column', hint: 'Two-column layout: use .sh-grid-2 with .sh-card elements. Highlight keywords with var(--color-primary).' },
+          { title: '詳細データ', layout: 'split-60-40', hint: '60/40 split: text content on left, Chart.js canvas on right. Use <canvas id="chartN"> + <script> for chart.' },
+          { title: '比較・特徴', layout: 'three-column', hint: 'Three-column grid: use .sh-grid-3 with .sh-card. Each card has icon (Font Awesome) + title + description.' },
+          { title: '分析', layout: 'split-half', hint: '50/50 split: left side with var(--color-surface) background, right side with main content or chart.' },
+          { title: 'ポイント', layout: 'content', hint: 'Content with .sh-list. Use .sh-section-heading for sub-sections. Density: 3-4 content blocks per slide.' },
+          { title: 'データ可視化', layout: 'data-chart', hint: 'Data visualization: text points on left, Chart.js (bar/doughnut/line) on right. Use theme colors for chart datasets.' },
+        ];
 
-      // Always end with summary (replace last middle if needed)
-      if (slideCount >= 3) {
-        slideStructure[slideStructure.length - 1] = {
-          title: 'まとめ',
-          layout: 'content',
-          hint: 'Summary: key takeaways with .sh-card. Call-to-action with .sh-badge. Footer with contact info.',
-        };
+        const middleCount = Math.max(0, effectiveSlideCount - 2);
+        for (let i = 0; i < middleCount; i++) {
+          const tpl = contentLayouts[i % contentLayouts.length];
+          slideStructure.push(tpl);
+        }
+
+        // Always end with summary (replace last middle if needed)
+        if (effectiveSlideCount >= 3) {
+          slideStructure[slideStructure.length - 1] = {
+            title: 'まとめ',
+            layout: 'content',
+            hint: 'Summary: key takeaways with .sh-card. Call-to-action with .sh-badge. Footer with contact info.',
+          };
+        }
       }
 
       // Create slides
-      for (let i = 0; i < slideCount; i++) {
+      for (let i = 0; i < effectiveSlideCount; i++) {
         const structure = slideStructure[Math.min(i, slideStructure.length - 1)];
         const slide = createSlide(structure.title);
         deck.slides.push(slide);
 
         const html = generateBlankSlideHtml({
           title: `${topic} - ${structure.title}`,
+          width: resolvedDims.width,
+          height: resolvedDims.height,
           theme: themeOptions,
+          format,
         });
         await storage.saveSlideHtml(deck.id, slide.id, html);
       }
@@ -509,9 +551,78 @@ DESIGN RULES: (1) Do NOT use Inter/Roboto/Arial - use theme Google Fonts. (2) Do
         }
       }
 
-      const instruction = `=== WORKFLOW ===
+      // Build format-specific instruction additions
+      const formatInstructions: Record<string, string> = {
+        'instagram-post': `\n=== FORMAT: INSTAGRAM POST (1080x1350) ===
+THIS IS NOT A PRESENTATION. Do NOT use slide deck patterns.
+- Visual-first single design. Max 15-20 words total.
+- Safe zone: center 1080x1080 square. Avoid top 250px and bottom 340px (UI overlays).
+- Typography: h1 60-80px bold (weight 700+), body 24-32px min.
+- Max 2-3 font families. No bullet lists, no headers/footers.
+- search_images orientation: portrait`,
+        'instagram-story': `\n=== FORMAT: INSTAGRAM STORY (1080x1920) ===
+THIS IS NOT A PRESENTATION. Full-screen immersive single design.
+- Safe zone: center 1080x1420px. Top 250px and bottom 350px reserved for platform UI.
+- Max 20 words. Structure: Hook headline -> Value -> CTA (above bottom 350px).
+- Full-bleed backgrounds preferred. No slide deck patterns.
+- search_images orientation: portrait`,
+        'youtube-thumbnail': `\n=== FORMAT: YOUTUBE THUMBNAIL (1280x720) ===
+THIS IS NOT A PRESENTATION. Single eye-catching thumbnail.
+- Text: 150-200px ULTRA BOLD (weight 900). MAX 3-5 WORDS (ideal 1-2).
+- REQUIRED text effects: text-shadow with black stroke (10-20px) + white glow + drop shadow.
+  Example: text-shadow: -4px -4px 0 #000, 4px -4px 0 #000, -4px 4px 0 #000, 4px 4px 0 #000, 0 0 20px rgba(255,255,255,0.5);
+- Face/subject: 30-50% of canvas. Max 3 visual elements total.
+- Complementary color pairs (yellow/purple, red/cyan). High saturation.
+- Must pass 168x94px shrink test. NO thin fonts, NO complex backgrounds.
+- NO bullet lists, NO paragraphs, NO cards, NO headers/footers.
+- search_images orientation: landscape`,
+        'x-post': `\n=== FORMAT: X/TWITTER POST (1200x675) ===
+THIS IS NOT A PRESENTATION. Single visual for timeline.
+- Min text 24px. Max 30 words. Key message must be readable at timeline size.
+- High contrast, consistent brand palette. Clean layout.
+- search_images orientation: landscape`,
+        'pinterest-pin': `\n=== FORMAT: PINTEREST PIN (1000x1500) ===
+THIS IS NOT A PRESENTATION. Single vertical pin design.
+- 2:3 ratio mandatory (algorithm penalizes others).
+- Bold text min 24pt. Script/hairline fonts BANNED.
+- Warm colors (red, orange, pink) have higher save rates.
+- Clear text hierarchy. Must pass 70% shrink test.
+- Listicle/step-by-step format works well.
+- search_images orientation: portrait`,
+        'linkedin-post': `\n=== FORMAT: LINKEDIN POST (1080x1080) ===
+- Professional sans-serif design. Data visualization emphasis.
+- Max 30 words per slide. Include source attributions for data.
+- For single post: one powerful visual. For carousel: 1 topic per slide.
+- search_images orientation: squarish`,
+        'a4': `\n=== FORMAT: A4 PRINT (2480x3508 @ 300DPI) ===
+THIS IS NOT A PRESENTATION. Single-page print design.
+- Bleed: 3mm all sides. Safe zone: 3-12mm from edge.
+- Text/logos must stay within safe zone.
+- Higher text density acceptable for print.
+- CMYK-safe colors preferred.
+- search_images orientation: portrait`,
+      };
+
+      const formatInstruction = format && formatInstructions[format] ? formatInstructions[format] : '';
+
+      const instruction = isSingleDesign
+        ? `=== WORKFLOW ===
+STEP 1 — DESIGN PLANNING:
+For the topic "${topic}", plan a single ${format} design (${resolvedDims.width}x${resolvedDims.height}px).
+Decide: key message, visual hierarchy, color usage, image placement.
+
+STEP 2 — HTML GENERATION (use update_slide):
+Write the full <body> HTML as a single visual composition.
+
+=== STYLE GUIDE ===
+1. CANVAS: ${resolvedDims.width}x${resolvedDims.height}px. This is a SINGLE DESIGN, not a slide deck.
+2. CSS VARIABLES: Use var(--color-*) and var(--font-*). No hardcoded colors.
+3. BANNED: slide deck patterns (sh-header, sh-footer, sh-list, sh-grid-*), bullet lists, Inter/Roboto/Arial, emoji, hardcoded #6366f1.
+4. REQUIRED: word-break:keep-all, clamp() for font-size/padding, Font Awesome icons only.
+5. Each slide <head> is pre-generated — only replace <body> content via update_slide.${formatInstruction}${audience ? `\nAUDIENCE: ${audience}.` : ''}${tone ? `\nTONE: ${tone}.` : ''}`
+        : `=== WORKFLOW ===
 STEP 1 — CONTENT PLANNING (do this BEFORE writing any HTML):
-For the topic "${topic}", create a detailed content plan for all ${slideCount} slides.
+For the topic "${topic}", create a detailed content plan for all ${effectiveSlideCount} slides.
 For each slide, decide:
   - Specific title (not generic — e.g., "出会いの場を増やす5つの方法" instead of "コンテンツ")
   - 3-5 key talking points or data to include
@@ -523,7 +634,7 @@ STEP 2 — HTML GENERATION (use update_slide for each slide):
 Write the full <body> HTML for each slide based on your plan.
 
 === STYLE GUIDE ===
-1. STRUCTURE: body = flex flex-col, padding var(--spacing-slide, 48px 64px), 1920×1080px. Three layers: header (.sh-header) → main (flex:1) → footer (.sh-footer).
+1. STRUCTURE: body = flex flex-col, padding var(--spacing-slide, 48px 64px), ${resolvedDims.width}×${resolvedDims.height}px. Three layers: header (.sh-header) → main (flex:1) → footer (.sh-footer).
 2. CSS VARIABLES (in <head>): --color-primary/secondary/accent/bg/surface/text/text-secondary/border, --font-heading/body, --heading-weight, --font-size-h1/h2/h3, --spacing-slide. USE THESE — no hardcoded colors.
 3. COMPONENTS: .sh-card, .sh-badge, .sh-badge-outline, .sh-accent-circle, .sh-header, .sh-footer, .sh-section-heading, .sh-list, .sh-grid-2, .sh-grid-3, .sh-split-half, .sh-split-60-40.
 4. CHARTS: Chart.js <canvas id="chartN"> + <script>. Use theme hex colors for datasets.
@@ -537,7 +648,7 @@ Write the full <body> HTML for each slide based on your plan.
 6. TYPOGRAPHY: Use clamp() for responsive sizing — h1: var(--font-size-h1, clamp(2rem,3.5vw,3.5rem)), h2: var(--font-size-h2, clamp(1.25rem,2vw,2rem)), h3: var(--font-size-h3, clamp(1rem,1.4vw,1.4rem)). Headings use var(--font-heading).
 7. Each slide <head> is pre-generated — only replace <body> content via update_slide.
 8. BANNED: Do NOT use Inter/Roboto/Arial fonts. Do NOT use hardcoded #6366f1. Do NOT center-align everything. Do NOT use emoji — use Font Awesome <i class="fas fa-xxx">.
-9. REQUIRED: Always include word-break:keep-all in body. Use var(--color-*) CSS variables. Use clamp() for all font-size and padding values.${templateStyle ? '\n10. TEMPLATE: Match the PPTX template colors and layout patterns from templateStyle.' : ''}${audience ? `\n11. AUDIENCE: ${audience}. ${audience === 'executive' ? 'Use high-level summaries, focus on business impact and ROI. Avoid jargon.' : audience === 'engineer' ? 'Include technical depth, code examples, architecture details welcome.' : audience === 'designer' ? 'Increase visual variety. Use asymmetric layouts and bold color choices.' : audience === 'student' ? 'Explain concepts clearly with simple, relatable examples.' : 'Balance accessibility and depth. Use clear headings and engaging visuals.'}` : ''}${tone ? `\n12. TONE: ${tone}. ${tone === 'formal' ? 'Professional language, structured arguments, data-driven.' : tone === 'casual' ? 'Friendly conversational style, approachable language.' : tone === 'technical' ? 'Precise terminology, include specs and implementation details.' : tone === 'persuasive' ? 'Strong verbs, clear calls-to-action, compelling narrative.' : ''}` : ''}`;
+9. REQUIRED: Always include word-break:keep-all in body. Use var(--color-*) CSS variables. Use clamp() for all font-size and padding values.${templateStyle ? '\n10. TEMPLATE: Match the PPTX template colors and layout patterns from templateStyle.' : ''}${audience ? `\n11. AUDIENCE: ${audience}. ${audience === 'executive' ? 'Use high-level summaries, focus on business impact and ROI. Avoid jargon.' : audience === 'engineer' ? 'Include technical depth, code examples, architecture details welcome.' : audience === 'designer' ? 'Increase visual variety. Use asymmetric layouts and bold color choices.' : audience === 'student' ? 'Explain concepts clearly with simple, relatable examples.' : 'Balance accessibility and depth. Use clear headings and engaging visuals.'}` : ''}${tone ? `\n12. TONE: ${tone}. ${tone === 'formal' ? 'Professional language, structured arguments, data-driven.' : tone === 'casual' ? 'Friendly conversational style, approachable language.' : tone === 'technical' ? 'Precise terminology, include specs and implementation details.' : tone === 'persuasive' ? 'Strong verbs, clear calls-to-action, compelling narrative.' : ''}` : ''}${formatInstruction}`;
 
       return {
         content: [{
@@ -547,13 +658,16 @@ Write the full <body> HTML for each slide based on your plan.
             deckId: deck.id,
             slideCount: deck.slides.length,
             theme: { id: theme.id, name: theme.name, colors: theme.colors, typography: theme.typography },
-            slides: slideStructure.slice(0, slideCount).map((s, i) => ({
+            slides: slideStructure.slice(0, effectiveSlideCount).map((s, i) => ({
               index: i,
               slideId: deck.slides[i].id,
               suggestedTitle: s.title,
               layout: s.layout,
               layoutHint: s.hint,
             })),
+            canvasSize: resolvedDims,
+            ...(format ? { format } : {}),
+            ...(isSingleDesign ? { singleDesign: true } : {}),
             ...(templateStyle ? { templateStyle } : {}),
             instruction,
           }, null, 2),
@@ -1120,6 +1234,27 @@ new Chart(document.getElementById('chart1'), {
     },
   );
 
+  // ===== CANVAS PRESETS =====
+
+  server.tool(
+    'list_canvas_presets',
+    'List all available canvas size presets grouped by category (presentation, social, print). Use preset IDs with create_deck, generate_deck, or export_deck.',
+    {},
+    async () => {
+      const grouped: Record<string, Array<{ id: string; label: string; width: number; height: number }>> = {};
+      for (const p of CANVAS_PRESETS) {
+        if (!grouped[p.category]) grouped[p.category] = [];
+        grouped[p.category].push({ id: p.id, label: p.label, width: p.width, height: p.height });
+      }
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(grouped, null, 2),
+        }],
+      };
+    },
+  );
+
   // ===== EXPORT =====
 
   server.tool(
@@ -1128,10 +1263,14 @@ new Chart(document.getElementById('chart1'), {
     {
       deckId: z.string().describe('Deck ID to export'),
       format: z.enum(['pdf', 'pptx', 'html', 'png']).describe('Export format'),
-      aspectRatio: z.enum(['16:9', '4:3', '16:10', '1:1']).optional().describe('Aspect ratio (default: 16:9)'),
+      aspectRatio: z.enum(['16:9', '4:3', '16:10', '1:1']).optional().describe('Aspect ratio (default: 16:9). Ignored if canvasSize is set.'),
+      canvasSize: z.union([
+        z.string().describe('Preset ID (e.g. "instagram-post", "a4")'),
+        z.object({ width: z.number(), height: z.number() }).describe('Custom canvas size in pixels'),
+      ]).optional().describe('Canvas size override. Priority: canvasSize arg > deck metadata canvasSize > aspectRatio > 16:9'),
       filename: z.string().optional().describe('Output filename (without extension). Defaults to deck title.'),
     },
-    async ({ deckId, format, aspectRatio, filename }) => {
+    async ({ deckId, format, aspectRatio, canvasSize: canvasSizeInput, filename }) => {
       const deck = await storage.loadDeck(deckId);
       if (!deck) {
         return { content: [{ type: 'text', text: 'Error: Deck not found' }], isError: true };
@@ -1152,28 +1291,35 @@ new Chart(document.getElementById('chart1'), {
       const exportDir = join(homedir(), '.slideharness', 'exports', deckId);
       await mkdir(exportDir, { recursive: true });
 
+      // Resolve canvas size: canvasSize arg > deck metadata > aspectRatio > default 16:9
+      const resolvedCanvas: CanvasSize | undefined = canvasSizeInput
+        ? getCanvasDimensions(canvasSizeInput as string | CanvasSize)
+        : deck.metadata?.canvasSize
+          ? resolveCanvasSize(deck.metadata as Record<string, unknown>)
+          : undefined;
+
       const ratio = aspectRatio ?? '16:9';
       let result;
 
       switch (format) {
         case 'pdf': {
           const outputPath = join(exportDir, `${safeTitle}.pdf`);
-          result = await exportToPdf(deck, slideHtmls, outputPath, ratio);
+          result = await exportToPdf(deck, slideHtmls, outputPath, ratio, resolvedCanvas);
           break;
         }
         case 'pptx': {
           const outputPath = join(exportDir, `${safeTitle}.pptx`);
-          result = await exportToPptx(deck, slideHtmls, outputPath, ratio);
+          result = await exportToPptx(deck, slideHtmls, outputPath, ratio, resolvedCanvas);
           break;
         }
         case 'html': {
           const outputPath = join(exportDir, `${safeTitle}.html`);
-          result = await exportToHtml(deck, slideHtmls, outputPath);
+          result = await exportToHtml(deck, slideHtmls, outputPath, resolvedCanvas);
           break;
         }
         case 'png': {
           const outputDir2 = join(exportDir, safeTitle);
-          result = await exportToPng(deck, slideHtmls, outputDir2, ratio);
+          result = await exportToPng(deck, slideHtmls, outputDir2, ratio, resolvedCanvas);
           break;
         }
       }
@@ -1190,6 +1336,7 @@ new Chart(document.getElementById('chart1'), {
             format,
             outputPath: result.outputPath,
             slideCount: slideHtmls.length,
+            ...(resolvedCanvas ? { canvasSize: resolvedCanvas } : {}),
           }, null, 2),
         }],
       };

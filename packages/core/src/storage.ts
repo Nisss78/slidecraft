@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir, readdir, unlink, rename, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import type { Deck } from './schema.js';
@@ -14,6 +14,36 @@ export interface TemplateMeta {
   slideCount?: number;
   colors?: string[];
   fonts?: string[];
+}
+
+export type AssetCategory = 'logo' | 'photo' | 'icon';
+
+export interface AssetMeta {
+  id: string;
+  originalName: string;
+  storedName: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+  category: AssetCategory;
+}
+
+export interface ColorMeta {
+  id: string;
+  hex: string;
+  name?: string;
+  createdAt: string;
+}
+
+export interface FontMeta {
+  id: string;
+  name: string;
+  type: 'upload' | 'google';
+  storedName?: string;
+  googleFamily?: string;
+  mimeType?: string;
+  size?: number;
+  createdAt: string;
 }
 
 export interface StorageAdapter {
@@ -35,6 +65,21 @@ export interface StorageAdapter {
   getImagePath(deckId: string, filename: string): string;
   listImages(deckId: string): Promise<Array<{ filename: string; size: number; createdAt: string }>>;
   deleteImage(deckId: string, filename: string): Promise<boolean>;
+  // Global assets
+  saveAsset(buffer: Buffer, originalName: string, mimeType: string, category?: AssetCategory): Promise<AssetMeta>;
+  listAssets(category?: AssetCategory): Promise<AssetMeta[]>;
+  getAssetPath(id: string): string | null;
+  deleteAsset(id: string): Promise<boolean>;
+  // Colors
+  saveColor(hex: string, name?: string): Promise<ColorMeta>;
+  listColors(): Promise<ColorMeta[]>;
+  deleteColor(id: string): Promise<boolean>;
+  // Fonts
+  saveFont(buffer: Buffer, originalName: string, mimeType: string): Promise<FontMeta>;
+  saveGoogleFont(family: string): Promise<FontMeta>;
+  listFonts(): Promise<FontMeta[]>;
+  getFontPath(id: string): string | null;
+  deleteFont(id: string): Promise<boolean>;
 }
 
 /**
@@ -47,12 +92,14 @@ export interface StorageAdapter {
 export class JsonFileStorage implements StorageAdapter {
   private basePath: string;
   private templatesPath: string;
+  private assetsPath: string;
   private cache = new Map<string, Deck>();
   private writeLocks = new Map<string, Promise<void>>();
 
   constructor(basePath?: string) {
     this.basePath = basePath || join(homedir(), '.slideharness', 'decks');
     this.templatesPath = join(this.basePath, '..', 'templates');
+    this.assetsPath = join(this.basePath, '..', 'assets');
   }
 
   getStoragePath(): string {
@@ -303,6 +350,265 @@ export class JsonFileStorage implements StorageAdapter {
     const filePath = join(this.imagesDir(deckId), filename);
     if (!existsSync(filePath)) return false;
     await unlink(filePath);
+    return true;
+  }
+
+  // ===== GLOBAL ASSET OPERATIONS =====
+
+  private assetsFilesDir(): string {
+    return join(this.assetsPath, 'files');
+  }
+
+  private assetsMetaPath(): string {
+    return join(this.assetsPath, 'meta.json');
+  }
+
+  private async loadAssetsMeta(): Promise<AssetMeta[]> {
+    const metaPath = this.assetsMetaPath();
+    if (!existsSync(metaPath)) return [];
+    try {
+      const data = await readFile(metaPath, 'utf-8');
+      return JSON.parse(data) as AssetMeta[];
+    } catch {
+      return [];
+    }
+  }
+
+  private async saveAssetsMeta(assets: AssetMeta[]): Promise<void> {
+    const metaPath = this.assetsMetaPath();
+    const tmpPath = metaPath + '.tmp.' + randomBytes(4).toString('hex');
+    await writeFile(tmpPath, JSON.stringify(assets, null, 2), 'utf-8');
+    await rename(tmpPath, metaPath);
+  }
+
+  async saveAsset(buffer: Buffer, originalName: string, mimeType: string, category: AssetCategory = 'photo'): Promise<AssetMeta> {
+    const filesDir = this.assetsFilesDir();
+    if (!existsSync(filesDir)) {
+      await mkdir(filesDir, { recursive: true });
+    }
+
+    const id = randomBytes(8).toString('hex');
+    const ext = originalName.split('.').pop()?.toLowerCase() || 'bin';
+    const storedName = `${id}.${ext}`;
+
+    await writeFile(join(filesDir, storedName), buffer);
+
+    const meta: AssetMeta = {
+      id,
+      originalName,
+      storedName,
+      mimeType,
+      size: buffer.length,
+      createdAt: new Date().toISOString(),
+      category,
+    };
+
+    const assets = await this.loadAssetsMeta();
+    assets.unshift(meta);
+    await this.saveAssetsMeta(assets);
+
+    return meta;
+  }
+
+  async listAssets(category?: AssetCategory): Promise<AssetMeta[]> {
+    const assets = await this.loadAssetsMeta();
+    // Migrate legacy assets without category
+    const migrated = assets.map(a => ({ ...a, category: a.category || 'photo' as AssetCategory }));
+    if (!category) return migrated;
+    return migrated.filter(a => a.category === category);
+  }
+
+  getAssetPath(id: string): string | null {
+    const filesDir = this.assetsFilesDir();
+    if (!existsSync(filesDir)) return null;
+    // Find the file matching this id prefix
+    const files = existsSync(filesDir) ? readdirSync(filesDir) as string[] : [];
+    const match = files.find((f: string) => f.startsWith(id + '.'));
+    return match ? join(filesDir, match) : null;
+  }
+
+  async deleteAsset(id: string): Promise<boolean> {
+    const assets = await this.loadAssetsMeta();
+    const idx = assets.findIndex(a => a.id === id);
+    if (idx < 0) return false;
+
+    const asset = assets[idx];
+    const filePath = join(this.assetsFilesDir(), asset.storedName);
+    if (existsSync(filePath)) {
+      await unlink(filePath);
+    }
+
+    assets.splice(idx, 1);
+    await this.saveAssetsMeta(assets);
+    return true;
+  }
+
+  // ===== COLOR OPERATIONS =====
+
+  private colorsMetaPath(): string {
+    return join(this.assetsPath, 'colors.json');
+  }
+
+  private async loadColorsMeta(): Promise<ColorMeta[]> {
+    const metaPath = this.colorsMetaPath();
+    if (!existsSync(metaPath)) return [];
+    try {
+      const data = await readFile(metaPath, 'utf-8');
+      return JSON.parse(data) as ColorMeta[];
+    } catch {
+      return [];
+    }
+  }
+
+  private async saveColorsMeta(colors: ColorMeta[]): Promise<void> {
+    if (!existsSync(this.assetsPath)) {
+      await mkdir(this.assetsPath, { recursive: true });
+    }
+    const metaPath = this.colorsMetaPath();
+    const tmpPath = metaPath + '.tmp.' + randomBytes(4).toString('hex');
+    await writeFile(tmpPath, JSON.stringify(colors, null, 2), 'utf-8');
+    await rename(tmpPath, metaPath);
+  }
+
+  async saveColor(hex: string, name?: string): Promise<ColorMeta> {
+    const meta: ColorMeta = {
+      id: randomBytes(8).toString('hex'),
+      hex,
+      name,
+      createdAt: new Date().toISOString(),
+    };
+    const colors = await this.loadColorsMeta();
+    colors.unshift(meta);
+    await this.saveColorsMeta(colors);
+    return meta;
+  }
+
+  async listColors(): Promise<ColorMeta[]> {
+    return this.loadColorsMeta();
+  }
+
+  async deleteColor(id: string): Promise<boolean> {
+    const colors = await this.loadColorsMeta();
+    const idx = colors.findIndex(c => c.id === id);
+    if (idx < 0) return false;
+    colors.splice(idx, 1);
+    await this.saveColorsMeta(colors);
+    return true;
+  }
+
+  // ===== FONT OPERATIONS =====
+
+  private fontsDir(): string {
+    return join(this.assetsPath, 'fonts');
+  }
+
+  private fontsFilesDir(): string {
+    return join(this.fontsDir(), 'files');
+  }
+
+  private fontsMetaPath(): string {
+    return join(this.fontsDir(), 'meta.json');
+  }
+
+  private async loadFontsMeta(): Promise<FontMeta[]> {
+    const metaPath = this.fontsMetaPath();
+    if (!existsSync(metaPath)) return [];
+    try {
+      const data = await readFile(metaPath, 'utf-8');
+      return JSON.parse(data) as FontMeta[];
+    } catch {
+      return [];
+    }
+  }
+
+  private async saveFontsMeta(fonts: FontMeta[]): Promise<void> {
+    const dir = this.fontsDir();
+    if (!existsSync(dir)) {
+      await mkdir(dir, { recursive: true });
+    }
+    const metaPath = this.fontsMetaPath();
+    const tmpPath = metaPath + '.tmp.' + randomBytes(4).toString('hex');
+    await writeFile(tmpPath, JSON.stringify(fonts, null, 2), 'utf-8');
+    await rename(tmpPath, metaPath);
+  }
+
+  async saveFont(buffer: Buffer, originalName: string, mimeType: string): Promise<FontMeta> {
+    const filesDir = this.fontsFilesDir();
+    if (!existsSync(filesDir)) {
+      await mkdir(filesDir, { recursive: true });
+    }
+
+    const id = randomBytes(8).toString('hex');
+    const ext = originalName.split('.').pop()?.toLowerCase() || 'ttf';
+    const storedName = `${id}.${ext}`;
+
+    await writeFile(join(filesDir, storedName), buffer);
+
+    const name = originalName.replace(/\.[^.]+$/, '');
+    const meta: FontMeta = {
+      id,
+      name,
+      type: 'upload',
+      storedName,
+      mimeType,
+      size: buffer.length,
+      createdAt: new Date().toISOString(),
+    };
+
+    const fonts = await this.loadFontsMeta();
+    fonts.unshift(meta);
+    await this.saveFontsMeta(fonts);
+
+    return meta;
+  }
+
+  async saveGoogleFont(family: string): Promise<FontMeta> {
+    const meta: FontMeta = {
+      id: randomBytes(8).toString('hex'),
+      name: family,
+      type: 'google',
+      googleFamily: family,
+      createdAt: new Date().toISOString(),
+    };
+
+    const fonts = await this.loadFontsMeta();
+    // Avoid duplicates
+    if (fonts.some(f => f.type === 'google' && f.googleFamily === family)) {
+      return fonts.find(f => f.type === 'google' && f.googleFamily === family)!;
+    }
+    fonts.unshift(meta);
+    await this.saveFontsMeta(fonts);
+
+    return meta;
+  }
+
+  async listFonts(): Promise<FontMeta[]> {
+    return this.loadFontsMeta();
+  }
+
+  getFontPath(id: string): string | null {
+    const filesDir = this.fontsFilesDir();
+    if (!existsSync(filesDir)) return null;
+    const files = readdirSync(filesDir) as string[];
+    const match = files.find((f: string) => f.startsWith(id + '.'));
+    return match ? join(filesDir, match) : null;
+  }
+
+  async deleteFont(id: string): Promise<boolean> {
+    const fonts = await this.loadFontsMeta();
+    const idx = fonts.findIndex(f => f.id === id);
+    if (idx < 0) return false;
+
+    const font = fonts[idx];
+    if (font.type === 'upload' && font.storedName) {
+      const filePath = join(this.fontsFilesDir(), font.storedName);
+      if (existsSync(filePath)) {
+        await unlink(filePath);
+      }
+    }
+
+    fonts.splice(idx, 1);
+    await this.saveFontsMeta(fonts);
     return true;
   }
 }
