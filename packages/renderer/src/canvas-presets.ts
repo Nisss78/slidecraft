@@ -20,9 +20,20 @@ export const CANVAS_PRESETS: CanvasPreset[] = [
   { id: 'x-post', label: 'X ポスト', category: 'social', width: 1200, height: 675 },
   { id: 'pinterest-pin', label: 'Pinterest ピン (2:3)', category: 'social', width: 1000, height: 1500 },
   { id: 'linkedin-post', label: 'LinkedIn 投稿 (1:1)', category: 'social', width: 1080, height: 1080 },
-  // Print
-  { id: 'a4', label: 'A4 縦', category: 'print', width: 2480, height: 3508 },
-  { id: 'a4-landscape', label: 'A4 横', category: 'print', width: 3508, height: 2480 },
+  // Print - A series
+  { id: 'a3', label: 'A3 縦 (297×420mm)', category: 'print', width: 3508, height: 4961 },
+  { id: 'a3-landscape', label: 'A3 横 (420×297mm)', category: 'print', width: 4961, height: 3508 },
+  { id: 'a4', label: 'A4 縦 (210×297mm)', category: 'print', width: 2480, height: 3508 },
+  { id: 'a4-landscape', label: 'A4 横 (297×210mm)', category: 'print', width: 3508, height: 2480 },
+  { id: 'a5', label: 'A5 縦 (148×210mm)', category: 'print', width: 1748, height: 2480 },
+  { id: 'a5-landscape', label: 'A5 横 (210×148mm)', category: 'print', width: 2480, height: 1748 },
+  // Print - B series
+  { id: 'b3', label: 'B3 縦 (364×515mm)', category: 'print', width: 4304, height: 6074 },
+  { id: 'b3-landscape', label: 'B3 横 (515×364mm)', category: 'print', width: 6074, height: 4304 },
+  { id: 'b4', label: 'B4 縦 (257×364mm)', category: 'print', width: 3035, height: 4304 },
+  { id: 'b4-landscape', label: 'B4 横 (364×257mm)', category: 'print', width: 4304, height: 3035 },
+  { id: 'b5', label: 'B5 縦 (182×257mm)', category: 'print', width: 2146, height: 3035 },
+  { id: 'b5-landscape', label: 'B5 横 (257×182mm)', category: 'print', width: 3035, height: 2146 },
 ];
 
 export function getPreset(id: string): CanvasPreset | undefined {
