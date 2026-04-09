@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import type { Deck, JsonFileStorage } from '@slideharness/core';
 import { createDeck, createSlide, addSlideToDeck, deleteSlideFromDeck, reorderSlides, updateDeckMeta } from '@slideharness/core';
 import { exportToPdf, exportToPptx } from '@slideharness/export';
-import { generateBlankSlideHtml, resolveCanvasSize, CANVAS_PRESETS } from '@slideharness/renderer';
+import { generateBlankSlideHtml, resolveCanvasSize, CANVAS_PRESETS, BUILT_IN_TEMPLATES } from '@slideharness/renderer';
 import { randomBytes } from 'node:crypto';
 import JSZip from 'jszip';
 import { basename } from 'node:path';
@@ -496,6 +496,47 @@ export class PreviewServer {
       const deleted = await this.storage.deleteTemplate(req.params.id);
       if (!deleted) { res.status(404).json({ error: 'Template not found' }); return; }
       res.json({ success: true });
+    });
+
+    // ===== BUILT-IN TEMPLATE APIs =====
+
+    this.app.get('/api/built-in-templates', (_req, res) => {
+      const format = _req.query.format as string | undefined;
+      const category = _req.query.category as string | undefined;
+      const search = _req.query.search as string | undefined;
+
+      let results = BUILT_IN_TEMPLATES;
+      if (format) results = results.filter(t => t.format === format);
+      if (category) results = results.filter(t => t.category === category);
+      if (search) {
+        const q = search.toLowerCase();
+        results = results.filter(t =>
+          t.id.toLowerCase().includes(q) ||
+          t.name.toLowerCase().includes(q) ||
+          t.nameJa.includes(q) ||
+          t.descriptionJa.includes(q) ||
+          t.tags.some(tag => tag.toLowerCase().includes(q)),
+        );
+      }
+
+      res.json(results.map(t => ({
+        id: t.id,
+        name: t.name,
+        nameJa: t.nameJa,
+        descriptionJa: t.descriptionJa,
+        format: t.format,
+        suggestedStylePreset: t.suggestedStylePreset,
+        slideCount: t.slideCount,
+        category: t.category,
+        icon: t.icon,
+        tags: t.tags,
+      })));
+    });
+
+    this.app.get('/api/built-in-templates/:id', (req, res) => {
+      const template = BUILT_IN_TEMPLATES.find(t => t.id === req.params.id);
+      if (!template) { res.status(404).json({ error: 'Template not found' }); return; }
+      res.json(template);
     });
 
     // ===== GLOBAL ASSETS API =====
@@ -1885,6 +1926,19 @@ export class PreviewServer {
     .my-tmpl-delete:hover { background: #dc2626; }
     .my-tmpl-card:hover .my-tmpl-delete { display: flex; }
 
+    /* Built-in Template Cards */
+    .filter-chip { padding: 4px 12px; border-radius: 16px; border: 1px solid var(--h-border); background: transparent; cursor: pointer; font-size: 12px; color: var(--h-sub); transition: all 0.15s; }
+    .filter-chip:hover { border-color: #6366f1; color: #6366f1; }
+    .filter-chip.active { background: #6366f1; color: #fff; border-color: #6366f1; }
+    .bi-tmpl-card { flex-shrink: 0; width: 200px; border: 1px solid var(--h-card-border); border-radius: 8px; overflow: hidden; cursor: pointer; transition: all 0.15s; }
+    .bi-tmpl-card:hover { border-color: #6366f1; transform: translateY(-2px); box-shadow: 0 4px 12px var(--h-card-hover); }
+    .bi-tmpl-preview { height: 80px; display: flex; align-items: center; justify-content: center; background: var(--h-input-bg); }
+    .bi-tmpl-body { padding: 10px; }
+    .bi-tmpl-name { font-size: 13px; font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bi-tmpl-desc { font-size: 11px; color: var(--h-sub); line-height: 1.3; margin-bottom: 6px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .bi-tmpl-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+    .bi-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--h-input-bg); color: var(--h-sub); }
+
     @media (max-width: 768px) { .sidebar { width: 56px; } .sidebar-logo { width: 36px; height: 36px; font-size: 14px; } .nav-item { width: 48px; } .nav-item span { display: none; } .main-content { margin-left: 56px; } .page { padding: 16px; } .top-bar { padding: 8px 16px; } }
 
     .mcp-guide-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--h-border); background: transparent; color: var(--h-sub); font-size: 16px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
@@ -1998,7 +2052,18 @@ export class PreviewServer {
       <div class="page-header">
         <h2>\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h2>
       </div>
-      <div class="templates-grid" id="templatesGrid"></div>
+      <!-- Built-in Template Catalog -->
+      <div id="builtInTemplatesCatalog" style="margin-bottom:32px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <h3 style="font-size:16px;font-weight:600">\u30d3\u30eb\u30c8\u30a4\u30f3\u30c6\u30f3\u30d7\u30ec\u30fc\u30c8</h3>
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="builtInFilterBtns"></div>
+        </div>
+        <div id="builtInSections"></div>
+      </div>
+      <div style="border-top:1px solid var(--h-border);padding-top:24px">
+        <h3 style="font-size:16px;font-weight:600;margin-bottom:16px">\u30d7\u30ed\u30b8\u30a7\u30af\u30c8\u304b\u3089</h3>
+        <div class="templates-grid" id="templatesGrid"></div>
+      </div>
     </div>
 
     <!-- Page: My Assets -->
@@ -2659,6 +2724,110 @@ export class PreviewServer {
     }
 
     loadMyTemplates();
+
+    // ===== Built-in Templates Catalog =====
+    var builtInTemplates = [];
+    var builtInActiveFormat = null;
+
+    function loadBuiltInTemplates() {
+      fetch('/api/built-in-templates').then(function(r) { return r.json(); }).then(function(data) {
+        builtInTemplates = data;
+        renderBuiltInFilters();
+        renderBuiltInSections();
+      }).catch(function() {});
+    }
+
+    function renderBuiltInFilters() {
+      var formats = [];
+      var seen = {};
+      builtInTemplates.forEach(function(t) {
+        if (!seen[t.format]) { seen[t.format] = true; formats.push(t.format); }
+      });
+      var container = document.getElementById('builtInFilterBtns');
+      if (!container) return;
+      var html = '<button class="filter-chip' + (!builtInActiveFormat ? ' active' : '') + '" onclick="filterBuiltIn(null)">\u3059\u3079\u3066</button>';
+      var formatLabels = { '16:9': '\u30d7\u30ec\u30bc\u30f3', 'instagram-post': 'IG\u6295\u7a3f', 'instagram-story': 'IG\u30b9\u30c8\u30fc\u30ea\u30fc', 'youtube-thumbnail': 'YouTube', 'x-post': 'X', 'pinterest-pin': 'Pinterest', 'linkedin-post': 'LinkedIn', 'a4': 'A4\u5370\u5237' };
+      formats.forEach(function(f) {
+        html += '<button class="filter-chip' + (builtInActiveFormat === f ? ' active' : '') + '" onclick="filterBuiltIn(\\'' + f + '\\')">' + (formatLabels[f] || f) + '</button>';
+      });
+      container.innerHTML = html;
+    }
+
+    function filterBuiltIn(format) {
+      builtInActiveFormat = format;
+      renderBuiltInFilters();
+      renderBuiltInSections();
+    }
+
+    function renderBuiltInSections() {
+      var container = document.getElementById('builtInSections');
+      if (!container) return;
+      var filtered = builtInActiveFormat ? builtInTemplates.filter(function(t) { return t.format === builtInActiveFormat; }) : builtInTemplates;
+      // Group by format
+      var groups = {};
+      var groupOrder = [];
+      filtered.forEach(function(t) {
+        if (!groups[t.format]) { groups[t.format] = []; groupOrder.push(t.format); }
+        groups[t.format].push(t);
+      });
+      var formatLabels = { '16:9': '\u30d7\u30ec\u30bc\u30f3\u30c6\u30fc\u30b7\u30e7\u30f3 (16:9)', 'instagram-post': 'Instagram \u6295\u7a3f (4:5)', 'instagram-story': 'Instagram \u30b9\u30c8\u30fc\u30ea\u30fc (9:16)', 'youtube-thumbnail': 'YouTube \u30b5\u30e0\u30cd\u30a4\u30eb', 'x-post': 'X \u30dd\u30b9\u30c8', 'pinterest-pin': 'Pinterest \u30d4\u30f3 (2:3)', 'linkedin-post': 'LinkedIn \u6295\u7a3f (1:1)', 'a4': 'A4 \u5370\u5237' };
+      var html = '';
+      groupOrder.forEach(function(fmt) {
+        var templates = groups[fmt];
+        html += '<div style="margin-bottom:32px">';
+        html += '<h4 style="font-size:14px;font-weight:600;color:var(--h-sub);margin-bottom:12px">' + (formatLabels[fmt] || fmt) + ' <span style="font-size:12px;font-weight:400;opacity:0.7">(' + templates.length + ')</span></h4>';
+        html += '<div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:8px;scroll-snap-type:x mandatory">';
+        templates.forEach(function(t) {
+          var presetColors = { 'bold-signal': '#dc2626', 'electric-studio': '#6366f1', 'creative-voltage': '#e11d48', 'dark-botanical': '#3f6212', 'notebook-tabs': '#92400e', 'pastel-geometry': '#c084fc', 'split-pastel': '#f472b6', 'vintage-editorial': '#b45309', 'neon-cyber': '#06b6d4', 'terminal-green': '#22c55e', 'swiss-modern': '#2563eb', 'kyoto-classic': '#4338ca' };
+          var color = presetColors[t.suggestedStylePreset] || '#6366f1';
+          html += '<div class="bi-tmpl-card" onclick="showBuiltInDetail(\\'' + t.id + '\\')" style="scroll-snap-align:start">';
+          html += '<div class="bi-tmpl-preview" style="border-top:3px solid ' + color + '"><i class="' + t.icon + '" style="color:' + color + ';font-size:24px"></i></div>';
+          html += '<div class="bi-tmpl-body">';
+          html += '<div class="bi-tmpl-name">' + escHtml(t.nameJa) + '</div>';
+          html += '<div class="bi-tmpl-desc">' + escHtml(t.descriptionJa).substring(0, 40) + '...</div>';
+          html += '<div class="bi-tmpl-tags">';
+          t.tags.slice(0, 3).forEach(function(tag) { html += '<span class="bi-tag">' + escHtml(tag) + '</span>'; });
+          html += '</div>';
+          html += '</div></div>';
+        });
+        html += '</div></div>';
+      });
+      container.innerHTML = html;
+    }
+
+    function showBuiltInDetail(id) {
+      fetch('/api/built-in-templates/' + id).then(function(r) { return r.json(); }).then(function(t) {
+        var presetColors = { 'bold-signal': '#dc2626', 'electric-studio': '#6366f1', 'creative-voltage': '#e11d48', 'dark-botanical': '#3f6212', 'notebook-tabs': '#92400e', 'pastel-geometry': '#c084fc', 'split-pastel': '#f472b6', 'vintage-editorial': '#b45309', 'neon-cyber': '#06b6d4', 'terminal-green': '#22c55e', 'swiss-modern': '#2563eb', 'kyoto-classic': '#4338ca' };
+        var color = presetColors[t.suggestedStylePreset] || '#6366f1';
+        var slidesHtml = t.slides.map(function(s, i) {
+          return '<div style="padding:8px 12px;border-left:2px solid ' + color + ';margin-bottom:8px;background:var(--h-input-bg);border-radius:0 4px 4px 0">' +
+            '<div style="font-size:12px;font-weight:600">' + (i+1) + '. ' + escHtml(s.title) + '</div>' +
+            '<div style="font-size:11px;color:var(--h-sub);margin-top:2px">' + escHtml(s.layout) + '</div></div>';
+        }).join('');
+        var modal = document.getElementById('templatePreviewModal');
+        document.getElementById('previewTemplateName').textContent = t.nameJa;
+        var container = modal.querySelector('.preview-slide-area');
+        container.innerHTML = '<div style="padding:24px;max-height:60vh;overflow-y:auto">' +
+          '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px"><i class="' + t.icon + '" style="font-size:28px;color:' + color + '"></i><div><div style="font-weight:600;font-size:16px">' + escHtml(t.nameJa) + '</div><div style="font-size:13px;color:var(--h-sub)">' + escHtml(t.name) + '</div></div></div>' +
+          '<p style="font-size:13px;color:var(--h-sub);margin-bottom:16px">' + escHtml(t.descriptionJa) + '</p>' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">' +
+          '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:' + color + ';color:#fff">' + t.format + '</span>' +
+          '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--h-input-bg);color:var(--h-sub)">' + t.slideCount + '\u30da\u30fc\u30b8</span>' +
+          '<span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(--h-input-bg);color:var(--h-sub)">' + t.suggestedStylePreset + '</span>' +
+          '</div>' +
+          '<h4 style="font-size:13px;font-weight:600;margin-bottom:8px">\u30b9\u30e9\u30a4\u30c9\u69cb\u6210</h4>' +
+          slidesHtml +
+          '<div style="margin-top:16px;padding:12px;background:var(--h-input-bg);border-radius:8px">' +
+          '<div style="font-size:12px;font-weight:600;margin-bottom:4px">MCP\u3067\u4f5c\u6210</div>' +
+          '<code style="font-size:11px;color:' + color + '">create_from_template templateId="' + t.id + '"</code>' +
+          '</div></div>';
+        modal.querySelector('.preview-nav').style.display = 'none';
+        modal.querySelector('.preview-footer').innerHTML = '<button class="pf-copy" onclick="closeTemplatePreview()">\u9589\u3058\u308b</button><button class="pf-copy" onclick="navigator.clipboard.writeText(\\'' + t.id + '\\');this.textContent=\\'\\u2713 \\u30b3\\u30d4\\u30fc\\u6e08\\u307f\\'">\u2328 ID\u3092\u30b3\u30d4\u30fc</button>';
+        modal.classList.add('open');
+      });
+    }
+
+    loadBuiltInTemplates();
 
     // ===== Asset Tabs =====
     var currentAssetTab = 'logo';

@@ -4,8 +4,8 @@ import { basename, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { exportToHtml, exportToPdf, exportToPng, exportToPptx } from '@slideharness/export';
-import { CANVAS_PRESETS, resolveCanvasSize, getCanvasDimensions } from '@slideharness/renderer';
-import type { CanvasSize } from '@slideharness/renderer';
+import { CANVAS_PRESETS, resolveCanvasSize, getCanvasDimensions, BUILT_IN_TEMPLATES, getTemplateById, getTemplatesByFormat, getTemplatesByCategory, searchTemplates } from '@slideharness/renderer';
+import type { CanvasSize, BuiltInTemplate } from '@slideharness/renderer';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { JsonFileStorage } from '@slideharness/core';
 import {
@@ -1250,6 +1250,178 @@ new Chart(document.getElementById('chart1'), {
         content: [{
           type: 'text',
           text: JSON.stringify(grouped, null, 2),
+        }],
+      };
+    },
+  );
+
+  // ===== BUILT-IN TEMPLATES =====
+
+  server.tool(
+    'list_built_in_templates',
+    'List built-in design templates with optional filtering by format, category, or search query. Returns template metadata for use with create_from_template.',
+    {
+      format: z.string().optional().describe('Filter by canvas format (e.g. "16:9", "instagram-post", "a4")'),
+      category: z.string().optional().describe('Filter by category: business, marketing, creative, data, education, personal'),
+      search: z.string().optional().describe('Search query to match against template names, descriptions, and tags'),
+    },
+    async ({ format, category, search }) => {
+      let results: BuiltInTemplate[] = BUILT_IN_TEMPLATES;
+
+      if (format) {
+        results = results.filter((t) => t.format === format);
+      }
+      if (category) {
+        results = results.filter((t) => t.category === category);
+      }
+      if (search) {
+        const q = search.toLowerCase();
+        results = results.filter(
+          (t) =>
+            t.id.toLowerCase().includes(q) ||
+            t.name.toLowerCase().includes(q) ||
+            t.nameJa.includes(q) ||
+            t.descriptionJa.includes(q) ||
+            t.tags.some((tag) => tag.toLowerCase().includes(q)),
+        );
+      }
+
+      const summary = results.map((t) => ({
+        id: t.id,
+        name: t.name,
+        nameJa: t.nameJa,
+        descriptionJa: t.descriptionJa,
+        format: t.format,
+        suggestedStylePreset: t.suggestedStylePreset,
+        slideCount: t.slideCount,
+        category: t.category,
+        icon: t.icon,
+        tags: t.tags,
+      }));
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ count: summary.length, templates: summary }, null, 2),
+        }],
+      };
+    },
+  );
+
+  server.tool(
+    'create_from_template',
+    'Create a new deck from a built-in template. Returns deck with blank themed slides and detailed per-slide AI generation instructions. Use update_slide to populate each slide based on the returned instructions.',
+    {
+      templateId: z.string().describe('Built-in template ID (e.g. "presentation-business-plan", "instagram-post-sale-promotion")'),
+      stylePreset: z.string().optional().describe('Override the suggested style preset'),
+      topic: z.string().optional().describe('Custom topic to adapt the template to (omit for sample content)'),
+      language: z.enum(['ja', 'en']).default('ja').describe('Language for generated content'),
+    },
+    async ({ templateId, stylePreset, topic, language }) => {
+      const template = getTemplateById(templateId);
+      if (!template) {
+        return {
+          content: [{ type: 'text', text: `Error: Template "${templateId}" not found. Use list_built_in_templates to see available templates.` }],
+          isError: true,
+        };
+      }
+
+      // Resolve theme
+      const resolvedPresetId = stylePreset ?? template.suggestedStylePreset;
+      const theme = registry.getTheme(resolvedPresetId) ?? registry.getTheme('genspark')!;
+      const themeOptions: SlideThemeOptions = {
+        colors: theme.colors,
+        typography: theme.typography,
+      };
+
+      // Resolve canvas size from template format
+      const effectiveCanvasSize = template.format;
+      const resolvedDims = getCanvasDimensions(effectiveCanvasSize as string | CanvasSize);
+
+      // Determine if single-design format
+      const SINGLE_DESIGN_FORMATS = ['instagram-post', 'instagram-story', 'youtube-thumbnail', 'x-post', 'pinterest-pin', 'a4'];
+      const isSingleDesign = SINGLE_DESIGN_FORMATS.includes(template.format);
+      const format = isSingleDesign ? template.format : undefined;
+
+      // Create deck
+      const deckTitle = topic ?? template.nameJa;
+      const deck = createDeck({
+        title: deckTitle,
+        description: template.descriptionJa,
+        metadata: {
+          canvasSize: effectiveCanvasSize,
+          ...(format ? { format } : {}),
+          templateId: template.id,
+        },
+      });
+
+      // Create slides
+      for (let i = 0; i < template.slideCount; i++) {
+        const slideInstruction = template.slides[Math.min(i, template.slides.length - 1)];
+        const slide = createSlide(slideInstruction.title);
+        deck.slides.push(slide);
+
+        const html = generateBlankSlideHtml({
+          title: `${deckTitle} - ${slideInstruction.title}`,
+          width: resolvedDims.width,
+          height: resolvedDims.height,
+          theme: themeOptions,
+          format,
+        });
+        await storage.saveSlideHtml(deck.id, slide.id, html);
+      }
+
+      deck.updatedAt = new Date().toISOString();
+      await storage.saveDeck(deck);
+
+      // Build per-slide instruction
+      const slideStructure = template.slides.slice(0, template.slideCount).map((s, i) => ({
+        index: i,
+        slideId: deck.slides[i].id,
+        suggestedTitle: s.title,
+        layout: s.layout,
+        prompt: s.prompt,
+      }));
+
+      // Build generation context instruction
+      const topicAdaptation = topic
+        ? `\n\nIMPORTANT: Adapt ALL content to the custom topic: "${topic}". Replace sample company names, data, and examples with relevant content for this topic. Maintain the same structure and layout but make the content specific to "${topic}".`
+        : '';
+
+      const langInstruction = language === 'en'
+        ? '\n\nLANGUAGE: Generate all visible text content in English.'
+        : '\n\nLANGUAGE: Generate all visible text content in Japanese (日本語).';
+
+      const instruction = `=== BUILT-IN TEMPLATE: ${template.name} ===
+${template.generationContext}${topicAdaptation}${langInstruction}
+
+=== WORKFLOW ===
+STEP 1 — Review the per-slide prompts below and plan content for ALL slides.
+STEP 2 — For each slide, call update_slide with full <body> HTML based on the prompt.
+
+=== STYLE GUIDE ===
+1. CANVAS: ${resolvedDims.width}x${resolvedDims.height}px. Style preset: ${resolvedPresetId}.
+2. CSS VARIABLES: Use var(--color-*) and var(--font-*). No hardcoded colors.
+3. BANNED: Inter/Roboto/Arial fonts, hardcoded #6366f1, emoji. Use Font Awesome icons only.
+4. REQUIRED: word-break:keep-all, clamp() for font-size/padding.
+5. Each slide <head> is pre-generated — only replace <body> content via update_slide.`;
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            success: true,
+            deckId: deck.id,
+            templateId: template.id,
+            templateName: template.nameJa,
+            slideCount: deck.slides.length,
+            theme: { id: theme.id, name: theme.name, colors: theme.colors, typography: theme.typography },
+            slides: slideStructure,
+            canvasSize: resolvedDims,
+            ...(format ? { format } : {}),
+            ...(isSingleDesign ? { singleDesign: true } : {}),
+            instruction,
+          }, null, 2),
         }],
       };
     },

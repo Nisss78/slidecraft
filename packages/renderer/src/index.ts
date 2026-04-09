@@ -7,3 +7,11 @@ export {
   resolveCanvasSize,
 } from './canvas-presets.js';
 export type { CanvasSize, CanvasPreset } from './canvas-presets.js';
+export {
+  BUILT_IN_TEMPLATES,
+  getTemplateById,
+  getTemplatesByFormat,
+  getTemplatesByCategory,
+  searchTemplates,
+} from './template-catalog.js';
+export type { BuiltInTemplate, TemplateSlideInstruction } from './template-catalog.js';

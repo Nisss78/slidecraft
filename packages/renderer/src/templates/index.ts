@@ -1,0 +1,11 @@
+export { FB_TEMPLATES } from './industry-fb.js';
+export { BEAUTY_TEMPLATES } from './industry-beauty.js';
+export { REALESTATE_TEMPLATES } from './industry-realestate.js';
+export { MEDICAL_TEMPLATES } from './industry-medical.js';
+export { EDUCATION_TEMPLATES } from './industry-education.js';
+export { FITNESS_TEMPLATES } from './industry-fitness.js';
+export { EC_TEMPLATES } from './industry-ec.js';
+export { IT_TEMPLATES } from './industry-it.js';
+export { EVENT_TEMPLATES } from './industry-event.js';
+export { FREELANCE_TEMPLATES } from './industry-freelance.js';
+export { PET_TEMPLATES } from './industry-pet.js';
